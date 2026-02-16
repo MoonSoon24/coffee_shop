@@ -9,6 +9,7 @@ class Product {
   final bool? isBundle;
   final bool? isRecommended;
   final List<BundleItem>? productBundles;
+  final List<dynamic>? productModifiers;
 
   Product({
     required this.id,
@@ -21,6 +22,7 @@ class Product {
     this.isBundle,
     this.isRecommended,
     this.productBundles,
+    this.productModifiers,
   });
 
   factory Product.fromJson(Map<String, dynamic> json) {
@@ -39,6 +41,7 @@ class Product {
                 .map((i) => BundleItem.fromJson(i))
                 .toList()
           : null,
+      productModifiers: json['modifiers'] as List<dynamic>?,
     );
   }
 
@@ -54,6 +57,7 @@ class Product {
       'is_bundle': isBundle,
       'is_recommended': isRecommended,
       'product_bundles': productBundles?.map((e) => e.toJson()).toList(),
+      'modifiers': productModifiers,
     };
   }
 }
@@ -217,6 +221,7 @@ class CartItem extends Product {
     super.isBundle,
     super.isRecommended,
     super.productBundles,
+    super.productModifiers,
     required this.cartId,
     required this.quantity,
     this.modifiers,
@@ -238,6 +243,7 @@ class CartItem extends Product {
       isBundle: product.isBundle,
       isRecommended: product.isRecommended,
       productBundles: product.productBundles,
+      productModifiers: product.productModifiers,
       cartId: json['cartId'] ?? '', // Handle client-side ID generation
       quantity: json['quantity'] ?? 1,
       modifiers: json['modifiers'] != null
