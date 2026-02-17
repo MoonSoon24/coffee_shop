@@ -73,6 +73,8 @@ class _ProductListScreenState extends State<ProductListScreen> {
   final Set<String> _selectedCartItems = <String>{};
   bool _isCartSelectionMode = false;
   int? _pendingParentOrderIdForNextSubmit;
+  OverlayEntry? _snackbarOverlayEntry;
+  AnimationController? _snackbarAnimationController;
 
   Stream<List<Map<String, dynamic>>> get _onlinePendingOrdersStream => supabase
       .from('orders')
@@ -94,6 +96,119 @@ class _ProductListScreenState extends State<ProductListScreen> {
       .order('created_at')
       .map((rows) => rows.where((row) => row['status'] == 'active').toList());
 
+  void _showDropdownSnackbar(String message, {bool isError = false}) {
+    _snackbarAnimationController?.dispose();
+    _snackbarOverlayEntry?.remove();
+
+    final overlayState = Overlay.of(context);
+    final controller = AnimationController(
+      vsync: overlayState,
+      duration: const Duration(milliseconds: 2400),
+    );
+
+    final slideAnimation = TweenSequence<Offset>([
+      TweenSequenceItem(
+        tween: Tween(
+          begin: const Offset(0, -1),
+          end: Offset.zero,
+        ).chain(CurveTween(curve: Curves.easeOutBack)),
+        weight: 20,
+      ),
+      TweenSequenceItem(tween: ConstantTween(Offset.zero), weight: 55),
+      TweenSequenceItem(
+        tween: Tween(
+          begin: Offset.zero,
+          end: const Offset(0, 0.35),
+        ).chain(CurveTween(curve: Curves.easeInCubic)),
+        weight: 25,
+      ),
+    ]).animate(controller);
+
+    final opacityAnimation = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 0, end: 1), weight: 20),
+      TweenSequenceItem(tween: ConstantTween(1), weight: 55),
+      TweenSequenceItem(tween: Tween(begin: 1, end: 0), weight: 25),
+    ]).animate(controller);
+
+    final backgroundColor = isError
+        ? Colors.red.shade700
+        : Colors.brown.shade700;
+
+    _snackbarAnimationController = controller;
+    _snackbarOverlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        top: 16,
+        left: 0,
+        right: 0,
+        child: SafeArea(
+          child: IgnorePointer(
+            child: AnimatedBuilder(
+              animation: controller,
+              builder: (context, child) {
+                return Opacity(
+                  opacity: opacityAnimation.value,
+                  child: FractionalTranslation(
+                    translation: slideAnimation.value,
+                    child: child,
+                  ),
+                );
+              },
+              child: Center(
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 440),
+                    margin: const EdgeInsets.symmetric(horizontal: 20),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: backgroundColor,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black26,
+                          blurRadius: 10,
+                          offset: Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      message,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    overlayState.insert(_snackbarOverlayEntry!);
+    controller.forward().whenComplete(() {
+      _snackbarOverlayEntry?.remove();
+      _snackbarOverlayEntry = null;
+      if (_snackbarAnimationController == controller) {
+        _snackbarAnimationController = null;
+      }
+      controller.dispose();
+    });
+  }
+
+  @override
+  void dispose() {
+    _snackbarAnimationController?.dispose();
+    _snackbarOverlayEntry?.remove();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -110,9 +225,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
             ],
             onSelected: (value) {
               if (value == 'cashier') {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Cashier Page aktif')),
-                );
+                _showDropdownSnackbar('Cashier page active');
               } else if (value == 'pesanan') {
                 _showOnlineOrdersDialog();
               }
@@ -540,14 +653,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                         }
                                       } catch (error) {
                                         if (!context.mounted) return;
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                              'Failed to process payment: $error',
-                                            ),
-                                          ),
+                                        _showDropdownSnackbar(
+                                          'Failed to process payment: $error',
+                                          isError: true,
                                         );
                                         return;
                                       }
@@ -555,14 +663,8 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                       _resetCurrentOrderDraft(
                                         showMessage: false,
                                       );
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            'Payment success (${payment.method})',
-                                          ),
-                                        ),
+                                      _showDropdownSnackbar(
+                                        'Payment success (${payment.method})',
                                       );
                                     },
                               style: ElevatedButton.styleFrom(
@@ -1161,18 +1263,14 @@ class _ProductListScreenState extends State<ProductListScreen> {
   Future<void> _handleMergeBill() async {
     final selectedEntries = _selectedCartEntries();
     if (selectedEntries.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pilih item yang ingin digabung dulu.')),
-      );
+      _showDropdownSnackbar('Pilih item yang ingin digabung dulu.');
       return;
     }
 
     final targetCandidates = await _fetchOtherActiveOrders();
     if (!mounted) return;
     if (targetCandidates.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Tidak ada order aktif tujuan gabung.')),
-      );
+      _showDropdownSnackbar('Tidak ada order aktif tujuan gabung.');
       return;
     }
 
@@ -1184,9 +1282,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
 
     final targetOrderId = int.tryParse(target['id'].toString());
     if (targetOrderId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Order tujuan tidak valid.')),
-      );
+      _showDropdownSnackbar('Order tujuan tidak valid.');
       return;
     }
 
@@ -1252,37 +1348,25 @@ class _ProductListScreenState extends State<ProductListScreen> {
       }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Gagal gabung nota: $error')));
+      _showDropdownSnackbar('Gagal gabung nota: $error', isError: true);
       return;
     }
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Item berhasil digabung ke Order #$targetOrderId'),
-      ),
-    );
+    _showDropdownSnackbar('Item berhasil digabung ke Order #$targetOrderId');
   }
 
   Future<void> _handleSplitBill() async {
     if (_currentActiveOrderId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Pisah nota membutuhkan order aktif. Simpan order dulu lalu coba lagi.',
-          ),
-        ),
+      _showDropdownSnackbar(
+        'Pisah nota membutuhkan order aktif. Simpan order dulu lalu coba lagi.',
       );
       return;
     }
 
     final selectedEntries = _selectedCartEntries();
     if (selectedEntries.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pilih item yang ingin dipisah dulu.')),
-      );
+      _showDropdownSnackbar('Pilih item yang ingin dipisah dulu.');
       return;
     }
 
@@ -1337,18 +1421,12 @@ class _ProductListScreenState extends State<ProductListScreen> {
         _isCartSelectionMode = false;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Item dipisah ke draft baru. Parent order: #$sourceOrderId',
-          ),
-        ),
+      _showDropdownSnackbar(
+        'Item dipisah ke draft baru. Parent order: #$sourceOrderId',
       );
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Gagal pisah nota: $error')));
+      _showDropdownSnackbar('Gagal pisah nota: $error', isError: true);
     }
   }
 
@@ -1376,18 +1454,14 @@ class _ProductListScreenState extends State<ProductListScreen> {
             .eq('id', _currentActiveOrderId!);
       } catch (error) {
         if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Gagal batal pesanan: $error')));
+        _showDropdownSnackbar('Gagal batal pesanan: $error', isError: true);
         return;
       }
     }
 
     if (!mounted) return;
     _resetCurrentOrderDraft(showMessage: false);
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Pesanan dibatalkan')));
+    _showDropdownSnackbar('Pesanan dibatalkan');
   }
 
   void _resetCurrentOrderDraft({bool showMessage = true}) {
@@ -1403,9 +1477,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
     });
 
     if (showMessage) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Cart dan detail order di-reset')),
-      );
+      _showDropdownSnackbar('Cart dan detail order di-reset');
     }
   }
 
@@ -1806,14 +1878,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                 );
 
                                 if (missingRequired) {
-                                  ScaffoldMessenger.of(
-                                    this.context,
-                                  ).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Please complete all required modifiers.',
-                                      ),
-                                    ),
+                                  _showDropdownSnackbar(
+                                    'Please complete all required modifiers.',
+                                    isError: true,
                                   );
                                   return;
                                 }
@@ -2192,8 +2259,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
         );
       } catch (error) {
         if (!mounted) return false;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to update current order: $error')),
+        _showDropdownSnackbar(
+          'Failed to update current order: $error',
+          isError: true,
         );
         return false;
       }
@@ -2221,8 +2289,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
         );
       } catch (error) {
         if (!mounted) return false;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save current order: $error')),
+        _showDropdownSnackbar(
+          'Failed to save current order: $error',
+          isError: true,
         );
         return false;
       }
@@ -2295,7 +2364,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
     }
 
     setState(() {
-      _currentActiveOrderId = orderId as int;
+      _currentActiveOrderId = orderId;
       _customerName = order['customer_name']?.toString();
       _orderType = order['type']?.toString() ?? _orderType;
       final notes = order['notes']?.toString();
@@ -2305,9 +2374,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
       _pendingParentOrderIdForNextSubmit = null;
     });
 
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('Switched to Order #$orderId')));
+    _showDropdownSnackbar('Switched to Order #$orderId');
   }
 
   Future<void> _showOnlineOrdersDialog() async {
@@ -2425,12 +2492,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                 if (!context.mounted) return;
                 Navigator.of(dialogContext).pop();
                 if (!updated) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Order status changed by another user. Refresh applied.',
-                      ),
-                    ),
+                  _showDropdownSnackbar(
+                    'Order status changed by another user. Refresh applied.',
+                    isError: true,
                   );
                 }
               },
@@ -2446,12 +2510,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                 if (!context.mounted) return;
                 if (!updated) {
                   Navigator.of(dialogContext).pop();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Order already handled from another app/session.',
-                      ),
-                    ),
+                  _showDropdownSnackbar(
+                    'Order already handled from another app/session.',
+                    isError: true,
                   );
                   return;
                 }
