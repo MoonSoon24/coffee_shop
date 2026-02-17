@@ -1,0 +1,161 @@
+part of '../../../cashier/presentation/screens/cashier_screen.dart';
+
+extension OrderDetailDialogMethods on _ProductListScreenState {
+  Future<void> _showOrderDetailModal(Map<String, dynamic> order) async {
+    final orderId = order['id'];
+    if (orderId == null) return;
+
+    final items = await _fetchOrderItems(orderId as int);
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text('Order #$orderId'),
+          content: SizedBox(
+            width: 520,
+            child: items.isEmpty
+                ? const Text('No order items found.')
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: items.length,
+                    itemBuilder: (context, index) {
+                      final item = items[index];
+                      return ListTile(
+                        title: Text(item.product.name),
+                        subtitle: Text(
+                          (() {
+                            final modifiersText = _onlineOrderModifiersText(
+                              item,
+                            );
+                            if (modifiersText.isEmpty) {
+                              return 'Qty: ${item.quantity}';
+                            }
+                            return 'Qty: ${item.quantity}\n$modifiersText';
+                          })(),
+                        ),
+                        trailing: Text(
+                          _formatRupiah(
+                            ((item.product.price +
+                                    _modifierExtraFromData(
+                                      item.modifiersData,
+                                    )) *
+                                item.quantity),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final updated = await _updateOrderStatusIfPending(
+                  orderId,
+                  OrderStatus.cancelled,
+                );
+
+                if (!context.mounted) return;
+                Navigator.of(dialogContext).pop();
+                if (!updated) {
+                  _showDropdownSnackbar(
+                    'Order status changed by another user. Refresh applied.',
+                    isError: true,
+                  );
+                }
+              },
+              child: const Text('Decline'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final updated = await _updateOrderStatusIfPending(
+                  orderId,
+                  OrderStatus.processing,
+                );
+
+                if (!context.mounted) return;
+                if (!updated) {
+                  Navigator.of(dialogContext).pop();
+                  _showDropdownSnackbar(
+                    'Order already handled from another app/session.',
+                    isError: true,
+                  );
+                  return;
+                }
+
+                final cart = context.read<CartProvider>();
+                for (final item in items) {
+                  cart.addItem(
+                    item.product,
+                    quantity: item.quantity,
+                    modifiers: item.modifiers,
+                    modifiersData: item.modifiersData,
+                  );
+                }
+
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('Accept'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<List<_OnlineOrderItem>> _fetchOrderItems(int orderId) async {
+    final rows = await supabase
+        .from('order_items')
+        .select('quantity, product_id, modifiers, products(*)')
+        .eq('order_id', orderId);
+
+    final List<_OnlineOrderItem> items = [];
+    for (final row in rows as List<dynamic>) {
+      final data = row as Map<String, dynamic>;
+      final quantity = (data['quantity'] as num?)?.toInt() ?? 1;
+      final productData = data['products'] as Map<String, dynamic>?;
+      final rawModifiers = data['modifiers'];
+
+      if (productData != null) {
+        final product = Product.fromJson(productData);
+        items.add(
+          _OnlineOrderItem(
+            product: product,
+            quantity: quantity,
+            modifiers: _toCartModifiers(rawModifiers, product),
+            modifiersData: _toModifiersData(rawModifiers, product),
+          ),
+        );
+      }
+    }
+
+    return items;
+  }
+
+  Future<bool> _updateOrderStatusIfPending(int orderId, String status) async {
+    final response = await supabase
+        .from('orders')
+        .update({'status': status})
+        .eq('id', orderId)
+        .eq('status', OrderStatus.pending)
+        .select('id');
+
+    final updatedRows = response as List<dynamic>;
+    return updatedRows.isNotEmpty;
+  }
+}
+
+class _OnlineOrderItem {
+  final Product product;
+  final int quantity;
+  final CartModifiers? modifiers;
+  final List<dynamic>? modifiersData;
+
+  _OnlineOrderItem({
+    required this.product,
+    required this.quantity,
+    this.modifiers,
+    this.modifiersData,
+  });
+}

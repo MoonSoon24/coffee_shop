@@ -4,7 +4,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../models/models.dart';
+import '/features/cashier/models/models.dart';
 
 class CartProvider extends ChangeNotifier {
   final Map<String, CartItem> _items = {};

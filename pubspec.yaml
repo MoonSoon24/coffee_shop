@@ -14,6 +14,8 @@ dependencies:
   supabase_flutter: ^2.12.0
   provider: ^6.1.5
   flutter_slidable: ^4.0.3
+  blue_thermal_printer: ^1.2.3
+  shared_preferences: ^2.5.4
 
 dev_dependencies:
   flutter_test:
