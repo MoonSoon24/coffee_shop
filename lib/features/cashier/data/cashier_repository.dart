@@ -1,6 +1,11 @@
 part of '../presentation/screens/cashier_screen.dart';
 
 class CashierRepository {
+  Stream<List<Map<String, dynamic>>> allOrdersStream() => supabase
+      .from('orders')
+      .stream(primaryKey: ['id'])
+      .order('created_at', ascending: false);
+
   Stream<List<Map<String, dynamic>>> activeOrdersStream() => supabase
       .from('orders')
       .stream(primaryKey: ['id'])

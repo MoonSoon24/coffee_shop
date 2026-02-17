@@ -207,7 +207,7 @@ class CartProvider extends ChangeNotifier {
     throw Exception('Unable to generate daily unique order id for $prefix');
   }
 
-  Future<void> updateExistingOrder({
+  Future<int> updateExistingOrder({
     required int orderId,
     String? customerName,
     String? tableName,
@@ -259,9 +259,10 @@ class CartProvider extends ChangeNotifier {
 
       await supabase.from('order_items').insert(orderItems);
     }
+    return orderId;
   }
 
-  Future<void> submitOrder({
+  Future<int> submitOrder({
     String? customerName,
     String? tableName,
     required String orderType,
@@ -318,7 +319,7 @@ class CartProvider extends ChangeNotifier {
       throw Exception('Failed to create order id after retries');
     }
 
-    final orderId = orderResponse['id'];
+    final orderId = (orderResponse['id'] as num).toInt();
 
     final List<Map<String, dynamic>> orderItems = _items.values.map((item) {
       return {
@@ -333,6 +334,7 @@ class CartProvider extends ChangeNotifier {
     await supabase.from('order_items').insert(orderItems);
 
     clearCart();
+    return orderId;
   }
 
   void clearCart() {

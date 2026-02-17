@@ -7,19 +7,58 @@ extension CashierAppBarMethods on _ProductListScreenState {
       backgroundColor: Colors.white,
       surfaceTintColor: Colors.white,
       actions: [
+        StreamBuilder<List<Map<String, dynamic>>>(
+          stream: _onlinePendingOrdersStream,
+          builder: (context, snapshot) {
+            final pendingOrders = snapshot.data ?? <Map<String, dynamic>>[];
+            return IconButton(
+              tooltip: 'Notification (online order)',
+              onPressed: _showOnlinePendingOrdersDialog,
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(Icons.notifications_active),
+                  if (pendingOrders.isNotEmpty)
+                    Positioned(
+                      right: -8,
+                      top: -8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          pendingOrders.length.toString(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
         PopupMenuButton<String>(
           tooltip: 'App menu',
-          icon: const Icon(Icons.apps),
+          icon: const Icon(Icons.menu),
           itemBuilder: (context) => const [
             PopupMenuItem(value: 'cashier', child: Text('Cashier Page')),
-            PopupMenuItem(value: 'pesanan', child: Text('Pesanan')),
+            PopupMenuItem(value: 'showorders', child: Text('Show Orders')),
             PopupMenuItem(value: 'printer', child: Text('Printer settings')),
           ],
           onSelected: (value) {
             if (value == 'cashier') {
               _showDropdownSnackbar('Cashier page active');
-            } else if (value == 'pesanan') {
-              _showOnlineOrdersDialog();
+            } else if (value == 'showorders') {
+              _showAllOrdersDialog();
             } else if (value == 'printer') {
               showPrinterSettingsDialog(
                 context,
@@ -43,14 +82,6 @@ extension CashierAppBarMethods on _ProductListScreenState {
     );
 
     final slideAnimation = TweenSequence<Offset>([
-      TweenSequenceItem(
-        tween: Tween(
-          begin: const Offset(0, -1),
-          end: Offset.zero,
-        ).chain(CurveTween(curve: Curves.easeOutBack)),
-        weight: 20,
-      ),
-      TweenSequenceItem(tween: ConstantTween(Offset.zero), weight: 55),
       TweenSequenceItem(
         tween: Tween(
           begin: Offset.zero,

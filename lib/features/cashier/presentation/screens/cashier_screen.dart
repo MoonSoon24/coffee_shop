@@ -6,6 +6,7 @@ import 'package:coffee_shop/core/utils/formatters.dart';
 import 'package:coffee_shop/features/cashier/models/models.dart';
 import 'package:coffee_shop/features/cashier/providers/cart_provider.dart';
 import 'package:coffee_shop/features/printing/presentation/dialogs/printer_settings_dialog.dart';
+import 'package:coffee_shop/features/printing/services/thermal_printer_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:provider/provider.dart';
@@ -56,6 +57,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
 
   Stream<List<Map<String, dynamic>>> get _activeOrdersStream =>
       _cashierRepository.activeOrdersStream();
+
+  Stream<List<Map<String, dynamic>>> get _allOrdersStream =>
+      _cashierRepository.allOrdersStream();
 
   @override
   void dispose() {
@@ -216,45 +220,25 @@ class _ProductListScreenState extends State<ProductListScreen> {
                               child: const Text('Select all'),
                             )
                           else ...[
-                            StreamBuilder<List<Map<String, dynamic>>>(
-                              stream: _onlinePendingOrdersStream,
-                              builder: (context, snapshot) {
-                                final pendingOrders =
-                                    snapshot.data ?? <Map<String, dynamic>>[];
-                                return IconButton(
-                                  tooltip: 'Notification (online order)',
-                                  onPressed: _showOnlineOrdersDialog,
-                                  icon: Stack(
-                                    clipBehavior: Clip.none,
-                                    children: [
-                                      const Icon(Icons.notifications_active),
-                                      if (pendingOrders.isNotEmpty)
-                                        Positioned(
-                                          right: -8,
-                                          top: -8,
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 6,
-                                              vertical: 2,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: Colors.red,
-                                              borderRadius:
-                                                  BorderRadius.circular(10),
-                                            ),
-                                            child: Text(
-                                              pendingOrders.length.toString(),
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                );
+                            PopupMenuButton<String>(
+                              tooltip: 'Print options',
+                              icon: const Icon(Icons.print),
+                              itemBuilder: (context) => const [
+                                PopupMenuItem(
+                                  value: 'prebill',
+                                  child: Text('Print pre-settlement bill'),
+                                ),
+                                PopupMenuItem(
+                                  value: 'kitchen',
+                                  child: Text('Print to kitchen'),
+                                ),
+                              ],
+                              onSelected: (value) async {
+                                if (value == 'prebill') {
+                                  await _printPreSettlementBill();
+                                } else if (value == 'kitchen') {
+                                  await _printKitchenTicket();
+                                }
                               },
                             ),
                             StreamBuilder<List<Map<String, dynamic>>>(
@@ -455,23 +439,76 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                         return;
                                       }
 
+                                      final receiptItems = cart.items.values
+                                          .map((item) {
+                                            final modifierExtra =
+                                                (item.modifiersData ??
+                                                        <dynamic>[])
+                                                    .whereType<
+                                                      Map<String, dynamic>
+                                                    >()
+                                                    .fold<double>(0, (
+                                                      sum,
+                                                      modifier,
+                                                    ) {
+                                                      final selected =
+                                                          modifier['selected_options']
+                                                              as List<
+                                                                dynamic
+                                                              >? ??
+                                                          <dynamic>[];
+                                                      return sum +
+                                                          selected
+                                                              .whereType<
+                                                                Map<
+                                                                  String,
+                                                                  dynamic
+                                                                >
+                                                              >()
+                                                              .fold<double>(
+                                                                0,
+                                                                (s, option) =>
+                                                                    s +
+                                                                    ((option['price']
+                                                                                as num?)
+                                                                            ?.toDouble() ??
+                                                                        0),
+                                                              );
+                                                    });
+                                            final unitPrice =
+                                                item.price + modifierExtra;
+                                            return <String, dynamic>{
+                                              'name': item.name,
+                                              'qty': item.quantity,
+                                              'subtotal':
+                                                  unitPrice * item.quantity,
+                                            };
+                                          })
+                                          .toList(growable: false);
+
+                                      final totalBeforeSubmit =
+                                          cart.totalAmount;
+                                      int? paidOrderId;
+
                                       try {
                                         if (_currentActiveOrderId != null) {
-                                          await cart.updateExistingOrder(
-                                            orderId: _currentActiveOrderId!,
-                                            customerName: _customerName,
-                                            tableName: _tableName,
-                                            orderType: _orderType,
-                                            paymentMethod: payment.method,
-                                            totalPaymentReceived:
-                                                payment.totalPaymentReceived,
-                                            cashNominalBreakdown:
-                                                payment.cashNominalBreakdown,
-                                            changeAmount: payment.changeAmount,
-                                            status: 'completed',
-                                          );
+                                          paidOrderId = await cart
+                                              .updateExistingOrder(
+                                                orderId: _currentActiveOrderId!,
+                                                customerName: _customerName,
+                                                tableName: _tableName,
+                                                orderType: _orderType,
+                                                paymentMethod: payment.method,
+                                                totalPaymentReceived: payment
+                                                    .totalPaymentReceived,
+                                                cashNominalBreakdown: payment
+                                                    .cashNominalBreakdown,
+                                                changeAmount:
+                                                    payment.changeAmount,
+                                                status: 'completed',
+                                              );
                                         } else {
-                                          await cart.submitOrder(
+                                          paidOrderId = await cart.submitOrder(
                                             customerName: _customerName,
                                             tableName: _tableName,
                                             orderType: _orderType,
@@ -486,13 +523,32 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                                 _pendingParentOrderIdForNextSubmit,
                                           );
                                         }
+                                        await ThermalPrinterService.instance
+                                            .printPaymentReceipt(
+                                              orderId: paidOrderId!,
+                                              lines: receiptItems,
+                                              total: totalBeforeSubmit,
+                                              paymentMethod: payment.method,
+                                              paid:
+                                                  payment.totalPaymentReceived,
+                                              change: payment.changeAmount,
+                                              customerName: _customerName,
+                                              tableName: _tableName,
+                                            );
                                       } catch (error) {
                                         if (!context.mounted) return;
-                                        _showDropdownSnackbar(
-                                          'Failed to process payment: $error',
-                                          isError: true,
-                                        );
-                                        return;
+                                        if (paidOrderId != null) {
+                                          _showDropdownSnackbar(
+                                            'Payment saved, but failed to print: $error',
+                                            isError: true,
+                                          );
+                                        } else {
+                                          _showDropdownSnackbar(
+                                            'Failed to process payment: $error',
+                                            isError: true,
+                                          );
+                                          return;
+                                        }
                                       }
 
                                       _resetCurrentOrderDraft(

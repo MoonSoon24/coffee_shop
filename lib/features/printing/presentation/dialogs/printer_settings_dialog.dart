@@ -1,9 +1,12 @@
-import 'package:blue_thermal_printer/blue_thermal_printer.dart';
-import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:coffee_shop/features/printing/services/thermal_printer_service.dart';
+import 'dart:io';
 
-// 1. Updated wrapper function to accept your onNotify callback
+import 'package:blue_thermal_printer/blue_thermal_printer.dart';
+import 'package:coffee_shop/features/printing/services/thermal_printer_service.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 Future<void> showPrinterSettingsDialog(
   BuildContext context, {
   required void Function(String message, {bool isError}) onNotify,
@@ -15,7 +18,6 @@ Future<void> showPrinterSettingsDialog(
 }
 
 class PrinterSettingsDialog extends StatefulWidget {
-  // 2. Pass the callback into the widget
   final void Function(String message, {bool isError}) onNotify;
 
   const PrinterSettingsDialog({super.key, required this.onNotify});
@@ -31,6 +33,7 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
   BluetoothDevice? _selectedDevice;
   bool _isLoading = true;
   bool _isConnected = false;
+  String? _loadError;
 
   @override
   void initState() {
@@ -38,24 +41,86 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
     _initPrinter();
   }
 
-  Future<void> _initPrinter() async {
-    setState(() => _isLoading = true);
+  Future<bool> _ensureLocationServiceEnabled() async {
+    try {
+      final serviceStatus = await Permission.locationWhenInUse.serviceStatus;
+      return serviceStatus == ServiceStatus.enabled;
+    } on MissingPluginException {
+      return true;
+    }
+  }
 
-    final devices = await _service.getBondedDevices();
-    final connected = await _service.isConnected;
-    final prefs = await SharedPreferences.getInstance();
-    final savedAddress = prefs.getString('printer_address');
-
-    BluetoothDevice? targetDevice;
-    if (savedAddress != null && devices.isNotEmpty) {
-      try {
-        targetDevice = devices.firstWhere((d) => d.address == savedAddress);
-      } catch (_) {
-        targetDevice = null;
-      }
+  Future<bool> _ensureBluetoothPermissions() async {
+    if (!Platform.isAndroid) {
+      return true;
     }
 
+    try {
+      final locationServiceEnabled = await _ensureLocationServiceEnabled();
+      if (!locationServiceEnabled) {
+        throw Exception(
+          'Location Services (GPS) is off. Please enable location service, then retry printer scan.',
+        );
+      }
+
+      final statuses = await [
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+      ].request();
+
+      final hasBluetoothPermission =
+          (statuses[Permission.bluetoothScan]?.isGranted ?? false) &&
+          (statuses[Permission.bluetoothConnect]?.isGranted ?? false);
+
+      if (!hasBluetoothPermission) {
+        return false;
+      }
+
+      final locationStatus = await Permission.locationWhenInUse.status;
+      if (!locationStatus.isGranted) {
+        final requested = await Permission.locationWhenInUse.request();
+        if (!requested.isGranted) {
+          return false;
+        }
+      }
+
+      return true;
+    } on MissingPluginException {
+      return true;
+    }
+  }
+
+  Future<void> _initPrinter() async {
     if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _loadError = null;
+      });
+    }
+
+    try {
+      final hasPermission = await _ensureBluetoothPermissions();
+      if (!hasPermission) {
+        throw Exception(
+          'Bluetooth permission is required. Please allow Bluetooth and Location access for printer discovery.',
+        );
+      }
+
+      final devices = await _service.getBondedDevices();
+      final connected = await _service.isConnected;
+      final prefs = await SharedPreferences.getInstance();
+      final savedAddress = prefs.getString('printer_address');
+
+      BluetoothDevice? targetDevice;
+      if (savedAddress != null && devices.isNotEmpty) {
+        try {
+          targetDevice = devices.firstWhere((d) => d.address == savedAddress);
+        } catch (_) {
+          targetDevice = null;
+        }
+      }
+
+      if (!mounted) return;
       setState(() {
         _devices = devices;
         _isConnected = connected;
@@ -63,6 +128,16 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
             targetDevice ?? (devices.isNotEmpty ? devices.first : null);
         _isLoading = false;
       });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _devices = [];
+        _selectedDevice = null;
+        _isConnected = false;
+        _isLoading = false;
+        _loadError = error.toString().replaceFirst('Exception: ', '');
+      });
+      widget.onNotify(_loadError!, isError: true);
     }
   }
 
@@ -75,18 +150,16 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
 
     if (success) {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('printer_address', _selectedDevice!.address ?? "");
-      await prefs.setString('printer_name', _selectedDevice!.name ?? "");
+      await prefs.setString('printer_address', _selectedDevice!.address ?? '');
+      await prefs.setString('printer_name', _selectedDevice!.name ?? '');
 
       if (mounted) {
         setState(() => _isConnected = true);
-        // 3. Use your custom callback here
-        widget.onNotify("Printer Connected!");
+        widget.onNotify('Printer Connected!');
       }
     } else {
       if (mounted) {
-        // 3. Use your custom callback for errors too
-        widget.onNotify("Connection Failed", isError: true);
+        widget.onNotify('Connection Failed', isError: true);
       }
     }
 
@@ -101,16 +174,16 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
         _isConnected = false;
         _isLoading = false;
       });
-      widget.onNotify("Printer Disconnected");
+      widget.onNotify('Printer Disconnected');
     }
   }
 
   Future<void> _handleTestPrint() async {
     try {
       await _service.printTestReceipt(
-        printerName: _selectedDevice?.name ?? "Unknown",
+        printerName: _selectedDevice?.name ?? 'Unknown',
       );
-      widget.onNotify("Test Print Sent");
+      widget.onNotify('Test Print Sent');
     } catch (e) {
       widget.onNotify(e.toString(), isError: true);
     }
@@ -119,7 +192,7 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text("Printer Settings"),
+      title: const Text('Printer Settings'),
       content: SizedBox(
         width: double.maxFinite,
         child: Column(
@@ -130,9 +203,31 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
                 height: 100,
                 child: Center(child: CircularProgressIndicator()),
               )
+            else if (_loadError != null)
+              Column(
+                children: [
+                  Text(_loadError!, style: const TextStyle(color: Colors.red)),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: _initPrinter,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry Permission & Refresh'),
+                  ),
+                ],
+              )
             else if (_devices.isEmpty)
-              const Text(
-                "No paired devices found.\nPlease pair a printer in Android Settings first.",
+              Column(
+                children: [
+                  const Text(
+                    'No paired devices found.\nPair printer in Bluetooth settings, then refresh.',
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: _initPrinter,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh Devices'),
+                  ),
+                ],
               )
             else
               Column(
@@ -154,18 +249,23 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
                         const SizedBox(width: 10),
                         Text(
                           _isConnected
-                              ? "Status: Connected"
-                              : "Status: Disconnected",
+                              ? 'Status: Connected'
+                              : 'Status: Disconnected',
                           style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          onPressed: _initPrinter,
+                          tooltip: 'Refresh devices',
+                          icon: const Icon(Icons.refresh),
                         ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 15),
-
                   DropdownButtonFormField<BluetoothDevice>(
                     decoration: const InputDecoration(
-                      labelText: "Select Printer",
+                      labelText: 'Select Printer',
                       border: OutlineInputBorder(),
                     ),
                     value: _selectedDevice,
@@ -174,7 +274,7 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
                       return DropdownMenuItem(
                         value: device,
                         child: Text(
-                          device.name ?? "Unknown Device",
+                          device.name ?? 'Unknown Device',
                           overflow: TextOverflow.ellipsis,
                         ),
                       );
@@ -191,31 +291,30 @@ class _PrinterSettingsDialogState extends State<PrinterSettingsDialog> {
         ),
       ),
       actions: [
-        if (!_isLoading && _devices.isNotEmpty) ...[
+        if (!_isLoading && _loadError == null && _devices.isNotEmpty) ...[
           if (_isConnected)
             TextButton.icon(
               onPressed: _handleTestPrint,
               icon: const Icon(Icons.print),
-              label: const Text("Test Print"),
+              label: const Text('Test Print'),
             ),
-
           if (_isConnected)
             TextButton(
               onPressed: _handleDisconnect,
               child: const Text(
-                "Disconnect",
+                'Disconnect',
                 style: TextStyle(color: Colors.red),
               ),
             )
           else
             ElevatedButton(
               onPressed: _handleConnect,
-              child: const Text("Connect"),
+              child: const Text('Connect'),
             ),
         ],
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text("Close"),
+          child: const Text('Close'),
         ),
       ],
     );

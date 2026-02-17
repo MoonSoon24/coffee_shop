@@ -717,6 +717,95 @@ extension CashierControllerMethods on _ProductListScreenState {
     return false;
   }
 
+  List<Map<String, dynamic>> _currentCartReceiptLines(CartProvider cart) {
+    return cart.items.values
+        .map((item) {
+          final modifiers = item.modifiersData ?? <dynamic>[];
+          final modifierExtra = modifiers
+              .whereType<Map<String, dynamic>>()
+              .fold<double>(0, (sum, modifier) {
+                final selected =
+                    modifier['selected_options'] as List<dynamic>? ??
+                    <dynamic>[];
+                return sum +
+                    selected.whereType<Map<String, dynamic>>().fold<double>(
+                      0,
+                      (s, option) =>
+                          s + ((option['price'] as num?)?.toDouble() ?? 0),
+                    );
+              });
+          final unitPrice = item.price + modifierExtra;
+          return <String, dynamic>{
+            'name': item.name,
+            'qty': item.quantity,
+            'subtotal': unitPrice * item.quantity,
+          };
+        })
+        .toList(growable: false);
+  }
+
+  Future<void> _printPreSettlementBill() async {
+    final cart = context.read<CartProvider>();
+    if (cart.items.isEmpty) {
+      _showDropdownSnackbar('Cart is empty. Nothing to print.', isError: true);
+      return;
+    }
+
+    final estimatedOrderId = _currentActiveOrderId ?? 0;
+    try {
+      await ThermalPrinterService.instance.printPaymentReceipt(
+        orderId: estimatedOrderId,
+        lines: _currentCartReceiptLines(cart),
+        total: cart.totalAmount,
+        paymentMethod: 'prebill',
+        paid: 0,
+        change: 0,
+        customerName: _customerName,
+        tableName: _tableName,
+      );
+      _showDropdownSnackbar('Pre-settlement bill printed.');
+    } catch (error) {
+      _showDropdownSnackbar('Failed to print pre-bill: $error', isError: true);
+    }
+  }
+
+  Future<void> _printKitchenTicket() async {
+    final cart = context.read<CartProvider>();
+    if (cart.items.isEmpty) {
+      _showDropdownSnackbar('Cart is empty. Nothing to print.', isError: true);
+      return;
+    }
+
+    final kitchenLines = cart.items.values
+        .map(
+          (item) => <String, dynamic>{
+            'name': '[KITCHEN] ${item.name}',
+            'qty': item.quantity,
+            'subtotal': 0,
+          },
+        )
+        .toList(growable: false);
+
+    try {
+      await ThermalPrinterService.instance.printPaymentReceipt(
+        orderId: _currentActiveOrderId ?? 0,
+        lines: kitchenLines,
+        total: 0,
+        paymentMethod: 'kitchen',
+        paid: 0,
+        change: 0,
+        customerName: _customerName,
+        tableName: _tableName,
+      );
+      _showDropdownSnackbar('Kitchen ticket printed.');
+    } catch (error) {
+      _showDropdownSnackbar(
+        'Failed to print kitchen ticket: $error',
+        isError: true,
+      );
+    }
+  }
+
   Future<void> _switchToActiveOrder(Map<String, dynamic> order) async {
     final orderId = order['id'];
     if (orderId == null) {

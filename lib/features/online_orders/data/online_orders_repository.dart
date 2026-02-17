@@ -19,9 +19,5 @@ class OnlineOrdersRepository {
       .from('orders')
       .stream(primaryKey: ['id'])
       .order('created_at', ascending: false)
-      .map(
-        (rows) => rows
-            .where((row) => row['order_source'] == 'online')
-            .toList(growable: false),
-      );
+      .map((rows) => rows.toList(growable: false));
 }
