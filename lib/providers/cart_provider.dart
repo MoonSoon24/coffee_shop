@@ -42,6 +42,10 @@ class CartProvider extends ChangeNotifier {
     });
   }
 
+  double _lineUnitPrice(CartItem item) {
+    return item.price + _modifierUnitPrice(item);
+  }
+
   void addItem(
     Product product, {
     required int quantity,
@@ -208,6 +212,11 @@ class CartProvider extends ChangeNotifier {
     String? customerName,
     String? tableName,
     required String orderType,
+    String? paymentMethod,
+    num? totalPaymentReceived,
+    Map<String, int>? cashNominalBreakdown,
+    num? changeAmount,
+    String? status,
   }) async {
     final supabase = Supabase.instance.client;
     final normalizedTotal = totalAmount % 1 == 0
@@ -222,8 +231,12 @@ class CartProvider extends ChangeNotifier {
           'discount_total': 0,
           'points_earned': 0,
           'points_used': 0,
-          'status': 'active',
+          'status': status ?? 'active',
           'type': orderType,
+          'payment_method': paymentMethod,
+          'total_payment_received': totalPaymentReceived,
+          'cash_nominal_breakdown': cashNominalBreakdown,
+          'change_amount': changeAmount,
           'customer_name': customerName,
           'notes': (tableName == null || tableName.isEmpty)
               ? null
@@ -252,6 +265,12 @@ class CartProvider extends ChangeNotifier {
     String? customerName,
     String? tableName,
     required String orderType,
+    String paymentMethod = 'cash',
+    num? totalPaymentReceived,
+    Map<String, int>? cashNominalBreakdown,
+    num? changeAmount,
+    String status = 'active',
+    int? parentOrderId,
   }) async {
     final supabase = Supabase.instance.client;
     final normalizedTotal = totalAmount % 1 == 0
@@ -270,11 +289,15 @@ class CartProvider extends ChangeNotifier {
               'discount_total': 0,
               'points_earned': 0,
               'points_used': 0,
-              'status': 'active',
+              'status': status,
               'type': orderType,
               'order_source': 'cashier',
-              'payment_method': 'cash',
+              'payment_method': paymentMethod,
+              'total_payment_received': totalPaymentReceived,
+              'cash_nominal_breakdown': cashNominalBreakdown,
+              'change_amount': changeAmount,
               'customer_name': customerName,
+              'parent_order_id': parentOrderId,
               'notes': (tableName == null || tableName.isEmpty)
                   ? null
                   : 'Table: $tableName',
@@ -302,7 +325,7 @@ class CartProvider extends ChangeNotifier {
         'order_id': orderId,
         'product_id': item.id,
         'quantity': item.quantity,
-        'price_at_time': item.price,
+        'price_at_time': _lineUnitPrice(item),
         'modifiers': item.modifiers?.toJson(),
       };
     }).toList();

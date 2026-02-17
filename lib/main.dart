@@ -70,7 +70,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
   String? _customerName;
   String? _tableName;
   int? _currentActiveOrderId;
-  final Set<String> _checkedCartItems = <String>{};
+  final Set<String> _selectedCartItems = <String>{};
+  bool _isCartSelectionMode = false;
+  int? _pendingParentOrderIdForNextSubmit;
 
   Stream<List<Map<String, dynamic>>> get _onlinePendingOrdersStream => supabase
       .from('orders')
@@ -258,97 +260,104 @@ class _ProductListScreenState extends State<ProductListScreen> {
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          StreamBuilder<List<Map<String, dynamic>>>(
-                            stream: _onlinePendingOrdersStream,
-                            builder: (context, snapshot) {
-                              final pendingOrders =
-                                  snapshot.data ?? <Map<String, dynamic>>[];
-                              return IconButton(
-                                tooltip: 'Notification (online order)',
-                                onPressed: _showOnlineOrdersDialog,
-                                icon: Stack(
-                                  clipBehavior: Clip.none,
-                                  children: [
-                                    const Icon(Icons.notifications_active),
-                                    if (pendingOrders.isNotEmpty)
-                                      Positioned(
-                                        right: -8,
-                                        top: -8,
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 6,
-                                            vertical: 2,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: Colors.red,
-                                            borderRadius: BorderRadius.circular(
-                                              10,
+                          if (_isCartSelectionMode)
+                            TextButton(
+                              onPressed: cart.items.isEmpty
+                                  ? null
+                                  : _selectAllCartItems,
+                              child: const Text('Select all'),
+                            )
+                          else ...[
+                            StreamBuilder<List<Map<String, dynamic>>>(
+                              stream: _onlinePendingOrdersStream,
+                              builder: (context, snapshot) {
+                                final pendingOrders =
+                                    snapshot.data ?? <Map<String, dynamic>>[];
+                                return IconButton(
+                                  tooltip: 'Notification (online order)',
+                                  onPressed: _showOnlineOrdersDialog,
+                                  icon: Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      const Icon(Icons.notifications_active),
+                                      if (pendingOrders.isNotEmpty)
+                                        Positioned(
+                                          right: -8,
+                                          top: -8,
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 6,
+                                              vertical: 2,
                                             ),
-                                          ),
-                                          child: Text(
-                                            pendingOrders.length.toString(),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.bold,
+                                            decoration: BoxDecoration(
+                                              color: Colors.red,
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
                                             ),
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                          StreamBuilder<List<Map<String, dynamic>>>(
-                            stream: _activeOrdersStream,
-                            builder: (context, snapshot) {
-                              final activeOrders =
-                                  snapshot.data ?? <Map<String, dynamic>>[];
-                              return IconButton(
-                                tooltip: 'List (active order list)',
-                                onPressed: _showActiveCashierOrdersDialog,
-                                icon: Stack(
-                                  clipBehavior: Clip.none,
-                                  children: [
-                                    const Icon(Icons.list_alt),
-                                    if (activeOrders.isNotEmpty)
-                                      Positioned(
-                                        right: -8,
-                                        top: -8,
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 6,
-                                            vertical: 2,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: Colors.blue,
-                                            borderRadius: BorderRadius.circular(
-                                              10,
-                                            ),
-                                          ),
-                                          child: Text(
-                                            activeOrders.length.toString(),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.bold,
+                                            child: Text(
+                                              pendingOrders.length.toString(),
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
                                             ),
                                           ),
                                         ),
-                                      ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                          IconButton(
-                            tooltip: 'Clear cart',
-                            onPressed: hasCurrentOrderDraft
-                                ? _resetCurrentOrderDraft
-                                : null,
-                            icon: const Icon(Icons.delete_sweep),
-                          ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                            StreamBuilder<List<Map<String, dynamic>>>(
+                              stream: _activeOrdersStream,
+                              builder: (context, snapshot) {
+                                final activeOrders =
+                                    snapshot.data ?? <Map<String, dynamic>>[];
+                                return IconButton(
+                                  tooltip: 'List (active order list)',
+                                  onPressed: _showActiveCashierOrdersDialog,
+                                  icon: Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      const Icon(Icons.list_alt),
+                                      if (activeOrders.isNotEmpty)
+                                        Positioned(
+                                          right: -8,
+                                          top: -8,
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 6,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.blue,
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                            ),
+                                            child: Text(
+                                              activeOrders.length.toString(),
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                            IconButton(
+                              tooltip: 'Clear cart',
+                              onPressed: hasCurrentOrderDraft
+                                  ? _resetCurrentOrderDraft
+                                  : null,
+                              icon: const Icon(Icons.delete_sweep),
+                            ),
+                          ],
                           PopupMenuButton<String>(
                             tooltip: 'Cart settings',
                             icon: const Icon(Icons.more_vert),
@@ -381,34 +390,69 @@ class _ProductListScreenState extends State<ProductListScreen> {
                             final key = entry.key;
                             final item = entry.value;
 
+                            final isSelected = _selectedCartItems.contains(key);
+
+                            final tile = ListTile(
+                              onLongPress: () =>
+                                  _enterSelectionModeWithItem(key),
+                              onTap: () {
+                                if (_isCartSelectionMode) {
+                                  _toggleSelectedCartItem(key);
+                                  return;
+                                }
+                                _openCartItemEditor(key, item);
+                              },
+                              title: Text(item.name),
+                              subtitle: Text(_cartSubtitle(item)),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (_isCartSelectionMode)
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 6),
+                                      child: Icon(
+                                        isSelected
+                                            ? Icons.check_circle
+                                            : Icons.radio_button_unchecked,
+                                        color: isSelected
+                                            ? Colors.green
+                                            : Colors.grey,
+                                        size: 18,
+                                      ),
+                                    )
+                                  else if (isSelected)
+                                    const Padding(
+                                      padding: EdgeInsets.only(right: 6),
+                                      child: Icon(
+                                        Icons.check_circle,
+                                        color: Colors.green,
+                                        size: 18,
+                                      ),
+                                    ),
+                                  Text(
+                                    'Rp ${((item.price + _modifierExtraFromData(item.modifiersData)) * item.quantity).toStringAsFixed(2)}',
+                                  ),
+                                ],
+                              ),
+                            );
+
+                            if (_isCartSelectionMode) {
+                              return tile;
+                            }
+
                             return Slidable(
                               key: ValueKey(key),
                               endActionPane: ActionPane(
                                 motion: const ScrollMotion(),
-                                extentRatio: 0.42,
+                                extentRatio: 0.24,
                                 children: [
-                                  SlidableAction(
-                                    onPressed: (_) {
-                                      setState(() {
-                                        if (_checkedCartItems.contains(key)) {
-                                          _checkedCartItems.remove(key);
-                                        } else {
-                                          _checkedCartItems.add(key);
-                                        }
-                                      });
-                                    },
-                                    backgroundColor: Colors.green,
-                                    foregroundColor: Colors.white,
-                                    icon: Icons.check,
-                                    label: 'Check',
-                                  ),
                                   SlidableAction(
                                     onPressed: (_) {
                                       context.read<CartProvider>().removeItem(
                                         key,
                                       );
                                       setState(() {
-                                        _checkedCartItems.remove(key);
+                                        _selectedCartItems.remove(key);
                                       });
                                     },
                                     backgroundColor: Colors.red,
@@ -418,28 +462,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                   ),
                                 ],
                               ),
-                              child: ListTile(
-                                onTap: () => _openCartItemEditor(key, item),
-                                title: Text(item.name),
-                                subtitle: Text(_cartSubtitle(item)),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    if (_checkedCartItems.contains(key))
-                                      const Padding(
-                                        padding: EdgeInsets.only(right: 6),
-                                        child: Icon(
-                                          Icons.check_circle,
-                                          color: Colors.green,
-                                          size: 18,
-                                        ),
-                                      ),
-                                    Text(
-                                      'Rp ${((item.price + _modifierExtraFromData(item.modifiersData)) * item.quantity).toStringAsFixed(2)}',
-                                    ),
-                                  ],
-                                ),
-                              ),
+                              child: tile,
                             );
                           },
                         ),
@@ -476,12 +499,58 @@ class _ProductListScreenState extends State<ProductListScreen> {
                               onPressed: cart.items.isEmpty
                                   ? null
                                   : () async {
-                                      final method =
+                                      final payment =
                                           await _showPaymentMethodModal(
                                             cart.totalAmount,
                                           );
-                                      if (!context.mounted || method == null)
+                                      if (!context.mounted || payment == null) {
                                         return;
+                                      }
+
+                                      try {
+                                        if (_currentActiveOrderId != null) {
+                                          await cart.updateExistingOrder(
+                                            orderId: _currentActiveOrderId!,
+                                            customerName: _customerName,
+                                            tableName: _tableName,
+                                            orderType: _orderType,
+                                            paymentMethod: payment.method,
+                                            totalPaymentReceived:
+                                                payment.totalPaymentReceived,
+                                            cashNominalBreakdown:
+                                                payment.cashNominalBreakdown,
+                                            changeAmount: payment.changeAmount,
+                                            status: 'completed',
+                                          );
+                                        } else {
+                                          await cart.submitOrder(
+                                            customerName: _customerName,
+                                            tableName: _tableName,
+                                            orderType: _orderType,
+                                            paymentMethod: payment.method,
+                                            totalPaymentReceived:
+                                                payment.totalPaymentReceived,
+                                            cashNominalBreakdown:
+                                                payment.cashNominalBreakdown,
+                                            changeAmount: payment.changeAmount,
+                                            status: 'completed',
+                                            parentOrderId:
+                                                _pendingParentOrderIdForNextSubmit,
+                                          );
+                                        }
+                                      } catch (error) {
+                                        if (!context.mounted) return;
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'Failed to process payment: $error',
+                                            ),
+                                          ),
+                                        );
+                                        return;
+                                      }
 
                                       _resetCurrentOrderDraft(
                                         showMessage: false,
@@ -491,7 +560,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                       ).showSnackBar(
                                         SnackBar(
                                           content: Text(
-                                            'Payment success ($method)',
+                                            'Payment success (${payment.method})',
                                           ),
                                         ),
                                       );
@@ -586,6 +655,18 @@ class _ProductListScreenState extends State<ProductListScreen> {
     });
   }
 
+  String _formatRupiah(num amount) {
+    final rounded = amount.round();
+    final isNegative = rounded < 0;
+    final digits = rounded.abs().toString();
+    final grouped = digits.replaceAllMapped(
+      RegExp(r'\B(?=(\d{3})+(?!\d))'),
+      (_) => '.',
+    );
+
+    return 'Rp ${isNegative ? '-' : ''}$grouped';
+  }
+
   Widget _buildProductCard(Product product) {
     final categoryColor = _categoryColor(product.category);
 
@@ -601,7 +682,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
             children: [
               Center(
                 child: Text(
-                  'Rp ${product.price.toStringAsFixed(0)}',
+                  _formatRupiah(product.price),
                   style: TextStyle(
                     color: Colors.white.withOpacity(0.2),
                     fontSize: 28,
@@ -650,20 +731,663 @@ class _ProductListScreenState extends State<ProductListScreen> {
     await _editCartItem(key, item, product);
   }
 
-  void _onCartSettingSelected(String value) {
-    var message = 'Feature belum tersedia';
+  void _toggleSelectedCartItem(String key) {
+    setState(() {
+      if (_selectedCartItems.contains(key)) {
+        _selectedCartItems.remove(key);
+      } else {
+        _selectedCartItems.add(key);
+      }
+
+      if (_selectedCartItems.isEmpty) {
+        _isCartSelectionMode = false;
+      }
+    });
+  }
+
+  void _enterSelectionModeWithItem(String key) {
+    setState(() {
+      _isCartSelectionMode = true;
+      _selectedCartItems.add(key);
+    });
+  }
+
+  void _selectAllCartItems() {
+    final items = context.read<CartProvider>().items;
+    setState(() {
+      _isCartSelectionMode = true;
+      _selectedCartItems
+        ..clear()
+        ..addAll(items.keys);
+    });
+  }
+
+  void _onCartSettingSelected(String value) async {
     if (value == 'gabung_nota') {
-      message = 'Gabung nota dipilih';
-    } else if (value == 'pisah_nota') {
-      message = 'Pisah nota dipilih';
-    } else if (value == 'batal_pesanan') {
-      _resetCurrentOrderDraft(showMessage: false);
-      message = 'Pesanan dibatalkan';
+      await _handleMergeBill();
+      return;
     }
 
+    if (value == 'pisah_nota') {
+      await _handleSplitBill();
+      return;
+    }
+
+    if (value == 'batal_pesanan') {
+      await _handleCancelOrder();
+    }
+  }
+
+  Map<String, CartItem> _selectedCartEntries() {
+    final cart = context.read<CartProvider>();
+    final selected = <String, CartItem>{};
+    for (final key in _selectedCartItems) {
+      final item = cart.items[key];
+      if (item != null) {
+        selected[key] = item;
+      }
+    }
+    return selected;
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchOtherActiveOrders() async {
+    final rows = await supabase
+        .from('orders')
+        .select('id, customer_name, total_price, order_source, type, notes')
+        .eq('status', 'active')
+        .neq('id', _currentActiveOrderId ?? -1)
+        .order('created_at');
+
+    return (rows as List<dynamic>).whereType<Map<String, dynamic>>().toList();
+  }
+
+  Future<Map<String, dynamic>?> _showSelectOrderDialog({
+    required String title,
+    required List<Map<String, dynamic>> orders,
+  }) async {
+    if (orders.isEmpty) {
+      return null;
+    }
+
+    return showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(title),
+          content: SizedBox(
+            width: 500,
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: orders.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final order = orders[index];
+                final orderId = order['id'];
+                final customerName = order['customer_name'] ?? 'Guest';
+                final total = order['total_price'] ?? 0;
+                return ListTile(
+                  title: Text('Order #$orderId - $customerName'),
+                  subtitle: Text('Total: Rp $total'),
+                  onTap: () => Navigator.of(dialogContext).pop(order),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchOrderItemRows(int orderId) async {
+    final rows = await supabase
+        .from('order_items')
+        .select('id, product_id, quantity, price_at_time, modifiers')
+        .eq('order_id', orderId);
+
+    return (rows as List<dynamic>).whereType<Map<String, dynamic>>().toList();
+  }
+
+  dynamic _canonicalizeJsonValue(dynamic value) {
+    if (value is Map) {
+      final entries = value.entries.toList()
+        ..sort((a, b) => a.key.toString().compareTo(b.key.toString()));
+      return {
+        for (final entry in entries)
+          entry.key.toString(): _canonicalizeJsonValue(entry.value),
+      };
+    }
+
+    if (value is List) {
+      final canonicalItems = value.map(_canonicalizeJsonValue).toList();
+      final allScalar = canonicalItems.every(
+        (item) => item is String || item is num || item is bool || item == null,
+      );
+      if (allScalar) {
+        canonicalItems.sort((a, b) => a.toString().compareTo(b.toString()));
+        return canonicalItems;
+      }
+
+      canonicalItems.sort((a, b) => jsonEncode(a).compareTo(jsonEncode(b)));
+      return canonicalItems;
+    }
+
+    return value;
+  }
+
+  String _modifierSignature(dynamic rawModifiers) {
+    final normalized = _normalizeRawModifiers(rawModifiers);
+    final canonical = _canonicalizeJsonValue(normalized);
+    return jsonEncode(canonical);
+  }
+
+  String _orderItemRowSignature(Map<String, dynamic> row) {
+    final productId = (row['product_id'] as num?)?.toInt() ?? 0;
+    final quantity = (row['quantity'] as num?)?.toInt() ?? 0;
+    final priceAtTime = (row['price_at_time'] as num?)?.toDouble() ?? 0;
+
+    return [
+      productId,
+      quantity,
+      priceAtTime.toStringAsFixed(6),
+      _modifierSignature(row['modifiers']),
+    ].join('|');
+  }
+
+  String _selectedCartItemSignature(CartItem item) {
+    return [
+      item.id,
+      item.quantity,
+      item.price.toStringAsFixed(6),
+      _modifierSignature(item.modifiers?.toJson()),
+    ].join('|');
+  }
+
+  List<int> _matchSelectedOrderItemIds({
+    required List<Map<String, dynamic>> rows,
+    required Iterable<CartItem> selectedItems,
+  }) {
+    final rowBuckets = <String, List<int>>{};
+
+    for (final row in rows) {
+      final rowId = (row['id'] as num?)?.toInt();
+      if (rowId == null) {
+        continue;
+      }
+
+      final signature = _orderItemRowSignature(row);
+      rowBuckets.putIfAbsent(signature, () => <int>[]).add(rowId);
+    }
+
+    final matchedIds = <int>[];
+    for (final item in selectedItems) {
+      final signature = _selectedCartItemSignature(item);
+      final bucket = rowBuckets[signature];
+      if (bucket == null || bucket.isEmpty) {
+        continue;
+      }
+
+      matchedIds.add(bucket.removeAt(0));
+    }
+
+    return matchedIds;
+  }
+
+  num _normalizeNum(num value) {
+    final rounded = value.roundToDouble();
+    if ((value - rounded).abs() < 0.000001) {
+      return rounded.toInt();
+    }
+    return value;
+  }
+
+  Future<void> _recalculateAndPersistOrderTotals(int orderId) async {
+    final rows = await supabase
+        .from('order_items')
+        .select('quantity, price_at_time')
+        .eq('order_id', orderId);
+
+    var total = 0.0;
+    for (final row
+        in (rows as List<dynamic>).whereType<Map<String, dynamic>>()) {
+      final quantity = (row['quantity'] as num?)?.toDouble() ?? 0;
+      final price = (row['price_at_time'] as num?)?.toDouble() ?? 0;
+      total += quantity * price;
+    }
+
+    final normalizedTotal = _normalizeNum(total);
+
+    await supabase
+        .from('orders')
+        .update({
+          'total_price': normalizedTotal,
+          'subtotal': normalizedTotal,
+          'discount_total': 0,
+        })
+        .eq('id', orderId);
+  }
+
+  Future<int> _generateDailyUniqueOrderId() async {
+    final now = DateTime.now();
+    final year = (now.year % 100).toString().padLeft(2, '0');
+    final month = now.month.toString().padLeft(2, '0');
+    final day = now.day.toString().padLeft(2, '0');
+    final prefix = '$year$month$day';
+    final prefixValue = int.parse(prefix);
+    final minId = prefixValue * 1000;
+    final maxId = minId + 999;
+
+    final existingRows = await supabase
+        .from('orders')
+        .select('id')
+        .gte('id', minId)
+        .lte('id', maxId);
+
+    final usedIds = (existingRows as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .map((row) => int.tryParse(row['id'].toString()))
+        .whereType<int>()
+        .toSet();
+
+    if (usedIds.length >= 1000) {
+      throw Exception('Daily order id capacity exhausted for $prefix');
+    }
+
+    for (var suffix = 0; suffix < 1000; suffix++) {
+      final candidate = minId + suffix;
+      if (!usedIds.contains(candidate)) {
+        return candidate;
+      }
+    }
+
+    throw Exception('Unable to generate daily unique order id for $prefix');
+  }
+
+  String? _buildOrderNotes({String? tableName, String? extraNote}) {
+    final parts = <String>[];
+    final normalizedTable = tableName?.trim() ?? '';
+    final normalizedExtra = extraNote?.trim() ?? '';
+
+    if (normalizedTable.isNotEmpty) {
+      parts.add('Table: $normalizedTable');
+    }
+
+    if (normalizedExtra.isNotEmpty) {
+      parts.add(normalizedExtra);
+    }
+
+    if (parts.isEmpty) {
+      return null;
+    }
+
+    return parts.join('\n');
+  }
+
+  String? _tableNameFromNotes(String? notes) {
+    if (notes == null || notes.trim().isEmpty) {
+      return null;
+    }
+
+    for (final line in notes.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.startsWith('Table:')) {
+        final table = trimmed.replaceFirst('Table:', '').trim();
+        return table.isEmpty ? null : table;
+      }
+    }
+
+    return null;
+  }
+
+  Future<String?> _showCancelReasonDialog() async {
+    final controller = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Batal pesanan'),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              labelText: 'Alasan batal (opsional)',
+              hintText: 'Contoh: Customer ubah pesanan',
+            ),
+            maxLines: 2,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Tutup'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+              child: const Text('Konfirmasi'),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+    return reason;
+  }
+
+  Future<int> _createActiveOrderDraft({
+    String? customerName,
+    String? tableName,
+    required String orderType,
+    int? parentOrderId,
+    String? extraNote,
+  }) async {
+    final orderId = await _generateDailyUniqueOrderId();
+    await supabase.from('orders').insert({
+      'id': orderId,
+      'status': 'active',
+      'type': orderType,
+      'order_source': 'cashier',
+      'payment_method': null,
+      'total_price': 0,
+      'subtotal': 0,
+      'discount_total': 0,
+      'points_earned': 0,
+      'points_used': 0,
+      'total_payment_received': null,
+      'cash_nominal_breakdown': null,
+      'change_amount': null,
+      'customer_name': customerName,
+      'parent_order_id': parentOrderId,
+      'notes': _buildOrderNotes(tableName: tableName, extraNote: extraNote),
+    });
+
+    return orderId;
+  }
+
+  Future<void> _insertCartEntriesToOrder({
+    required int orderId,
+    required Iterable<CartItem> items,
+  }) async {
+    final payload = items
+        .map(
+          (item) => {
+            'order_id': orderId,
+            'product_id': item.id,
+            'quantity': item.quantity,
+            'price_at_time': item.price,
+            'modifiers': item.modifiers?.toJson(),
+          },
+        )
+        .toList();
+
+    if (payload.isEmpty) {
+      return;
+    }
+
+    await supabase.from('order_items').insert(payload);
+  }
+
+  Future<bool> _cancelSourceIfNoRemainingItems(
+    int sourceOrderId, {
+    String? extraNote,
+  }) async {
+    final remaining = await _fetchOrderItemRows(sourceOrderId);
+    if (remaining.isNotEmpty) {
+      return false;
+    }
+
+    final existingOrder = await supabase
+        .from('orders')
+        .select('notes')
+        .eq('id', sourceOrderId)
+        .single();
+    final existingNotes = existingOrder['notes']?.toString();
+
+    final updatedNotes = _buildOrderNotes(
+      tableName: _tableNameFromNotes(existingNotes),
+      extraNote: extraNote,
+    );
+
+    await supabase
+        .from('orders')
+        .update({'status': OrderStatus.cancelled, 'notes': updatedNotes})
+        .eq('id', sourceOrderId);
+    return true;
+  }
+
+  Future<void> _handleMergeBill() async {
+    final selectedEntries = _selectedCartEntries();
+    if (selectedEntries.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pilih item yang ingin digabung dulu.')),
+      );
+      return;
+    }
+
+    final targetCandidates = await _fetchOtherActiveOrders();
+    if (!mounted) return;
+    if (targetCandidates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tidak ada order aktif tujuan gabung.')),
+      );
+      return;
+    }
+
+    final target = await _showSelectOrderDialog(
+      title: 'Gabung ke order aktif',
+      orders: targetCandidates,
+    );
+    if (!mounted || target == null) return;
+
+    final targetOrderId = int.tryParse(target['id'].toString());
+    if (targetOrderId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Order tujuan tidak valid.')),
+      );
+      return;
+    }
+
+    try {
+      if (_currentActiveOrderId != null) {
+        final cart = context.read<CartProvider>();
+        await cart.updateExistingOrder(
+          orderId: _currentActiveOrderId!,
+          customerName: _customerName,
+          tableName: _tableName,
+          orderType: _orderType,
+        );
+
+        final rows = await _fetchOrderItemRows(_currentActiveOrderId!);
+        final selectedIds = _matchSelectedOrderItemIds(
+          rows: rows,
+          selectedItems: selectedEntries.values,
+        );
+
+        if (selectedIds.isEmpty) {
+          throw Exception(
+            'Tidak menemukan item order yang dipilih untuk digabung.',
+          );
+        }
+
+        await supabase
+            .from('order_items')
+            .update({'order_id': targetOrderId})
+            .inFilter('id', selectedIds);
+
+        await _recalculateAndPersistOrderTotals(_currentActiveOrderId!);
+        await _recalculateAndPersistOrderTotals(targetOrderId);
+
+        final sourceCancelled = await _cancelSourceIfNoRemainingItems(
+          _currentActiveOrderId!,
+          extraNote: 'Merged into Order #$targetOrderId',
+        );
+        if (sourceCancelled) {
+          _resetCurrentOrderDraft(showMessage: false);
+        } else {
+          final refreshed = await supabase
+              .from('orders')
+              .select('id, customer_name, type, notes')
+              .eq('id', _currentActiveOrderId!)
+              .single();
+          if (!mounted) return;
+          await _switchToActiveOrder(refreshed);
+        }
+      } else {
+        await _insertCartEntriesToOrder(
+          orderId: targetOrderId,
+          items: selectedEntries.values,
+        );
+        await _recalculateAndPersistOrderTotals(targetOrderId);
+        final cart = context.read<CartProvider>();
+        for (final key in selectedEntries.keys) {
+          cart.removeItem(key);
+        }
+        setState(() {
+          _selectedCartItems.removeAll(selectedEntries.keys);
+          _isCartSelectionMode = _selectedCartItems.isNotEmpty;
+        });
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Gagal gabung nota: $error')));
+      return;
+    }
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Item berhasil digabung ke Order #$targetOrderId'),
+      ),
+    );
+  }
+
+  Future<void> _handleSplitBill() async {
+    if (_currentActiveOrderId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Pisah nota membutuhkan order aktif. Simpan order dulu lalu coba lagi.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    final selectedEntries = _selectedCartEntries();
+    if (selectedEntries.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pilih item yang ingin dipisah dulu.')),
+      );
+      return;
+    }
+
+    final sourceOrderId = _currentActiveOrderId!;
+
+    try {
+      final cart = context.read<CartProvider>();
+      await cart.updateExistingOrder(
+        orderId: sourceOrderId,
+        customerName: _customerName,
+        tableName: _tableName,
+        orderType: _orderType,
+      );
+
+      final rows = await _fetchOrderItemRows(sourceOrderId);
+      final selectedIds = _matchSelectedOrderItemIds(
+        rows: rows,
+        selectedItems: selectedEntries.values,
+      );
+
+      if (selectedIds.isEmpty) {
+        throw Exception(
+          'Tidak menemukan item order yang dipilih untuk dipisah.',
+        );
+      }
+
+      await supabase.from('order_items').delete().inFilter('id', selectedIds);
+
+      await _recalculateAndPersistOrderTotals(sourceOrderId);
+      await _cancelSourceIfNoRemainingItems(
+        sourceOrderId,
+        extraNote: 'Items split to new cashier draft',
+      );
+
+      cart.clearCart();
+      for (final item in selectedEntries.values) {
+        cart.addItem(
+          item,
+          quantity: item.quantity,
+          modifiers: item.modifiers,
+          modifiersData: item.modifiersData,
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _currentActiveOrderId = null;
+        _pendingParentOrderIdForNextSubmit = sourceOrderId;
+        _customerName = null;
+        _tableName = null;
+        _selectedCartItems.clear();
+        _isCartSelectionMode = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Item dipisah ke draft baru. Parent order: #$sourceOrderId',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Gagal pisah nota: $error')));
+    }
+  }
+
+  Future<void> _handleCancelOrder() async {
+    final cancelReason = await _showCancelReasonDialog();
+    if (!mounted || cancelReason == null) {
+      return;
+    }
+
+    if (_currentActiveOrderId != null) {
+      try {
+        final reasonText = cancelReason.trim().isEmpty
+            ? 'Cancelled from cashier app'
+            : 'Cancel reason: ${cancelReason.trim()}';
+
+        await supabase
+            .from('orders')
+            .update({
+              'status': OrderStatus.cancelled,
+              'notes': _buildOrderNotes(
+                tableName: _tableName,
+                extraNote: reasonText,
+              ),
+            })
+            .eq('id', _currentActiveOrderId!);
+      } catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Gagal batal pesanan: $error')));
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    _resetCurrentOrderDraft(showMessage: false);
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    ).showSnackBar(const SnackBar(content: Text('Pesanan dibatalkan')));
   }
 
   void _resetCurrentOrderDraft({bool showMessage = true}) {
@@ -673,7 +1397,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
       _tableName = null;
       _orderType = 'dine_in';
       _currentActiveOrderId = null;
-      _checkedCartItems.clear();
+      _selectedCartItems.clear();
+      _isCartSelectionMode = false;
+      _pendingParentOrderIdForNextSubmit = null;
     });
 
     if (showMessage) {
@@ -1049,7 +1775,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
-                          'Total: Rp ${lineTotal.toStringAsFixed(0)}',
+                          'Total: ${_formatRupiah(lineTotal)}',
                           textAlign: TextAlign.right,
                           style: const TextStyle(
                             fontSize: 16,
@@ -1155,10 +1881,10 @@ class _ProductListScreenState extends State<ProductListScreen> {
       return option.name;
     }
 
-    return '${option.name} (+Rp ${option.price.toStringAsFixed(0)})';
+    return '${option.name} (+${_formatRupiah(option.price)})';
   }
 
-  Future<String?> _showPaymentMethodModal(double totalAmount) async {
+  Future<_PaymentResult?> _showPaymentMethodModal(double totalAmount) async {
     const cashDenominations = <int>[
       1000,
       2000,
@@ -1170,18 +1896,22 @@ class _ProductListScreenState extends State<ProductListScreen> {
     ];
 
     var paymentMethod = 'cash';
-    var selectedCash = <int>[];
+    var selectedCashCounts = <int, int>{};
 
-    return showDialog<String>(
+    return showDialog<_PaymentResult>(
       context: context,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (context, setState) {
-            final cashPaid = selectedCash.fold<int>(
+            final cashPaid = selectedCashCounts.entries.fold<int>(
               0,
-              (sum, value) => sum + value,
+              (sum, entry) => sum + (entry.key * entry.value),
             );
             final change = cashPaid - totalAmount;
+            final selectedBreakdown = cashDenominations
+                .where((value) => (selectedCashCounts[value] ?? 0) > 0)
+                .map((value) => 'Rp $value x${selectedCashCounts[value]}')
+                .toList();
 
             return AlertDialog(
               title: const Text('Payment Method'),
@@ -1192,7 +1922,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Total: Rp ${totalAmount.toStringAsFixed(0)}',
+                      'Total: ${_formatRupiah(totalAmount)}',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 12),
@@ -1217,32 +1947,65 @@ class _ProductListScreenState extends State<ProductListScreen> {
                         runSpacing: 8,
                         children: cashDenominations.map((value) {
                           return ActionChip(
-                            label: Text('Rp $value'),
+                            label: Text(_formatRupiah(value)),
                             onPressed: () {
                               setState(() {
-                                selectedCash = [...selectedCash, value];
+                                selectedCashCounts = {
+                                  ...selectedCashCounts,
+                                  value: (selectedCashCounts[value] ?? 0) + 1,
+                                };
                               });
                             },
                           );
                         }).toList(),
                       ),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 12),
+                      if (selectedBreakdown.isNotEmpty) ...[
+                        const Text(
+                          'Nominal terpilih (tap - untuk mengurangi):',
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: cashDenominations
+                              .where(
+                                (value) => (selectedCashCounts[value] ?? 0) > 0,
+                              )
+                              .map((value) {
+                                final count = selectedCashCounts[value] ?? 0;
+                                return InputChip(
+                                  avatar: const Icon(Icons.remove, size: 18),
+                                  label: Text('Rp $value x$count'),
+                                  onPressed: () {
+                                    setState(() {
+                                      final nextCount = count - 1;
+                                      selectedCashCounts = {
+                                        ...selectedCashCounts,
+                                      };
+                                      if (nextCount <= 0) {
+                                        selectedCashCounts.remove(value);
+                                      } else {
+                                        selectedCashCounts[value] = nextCount;
+                                      }
+                                    });
+                                  },
+                                );
+                              })
+                              .toList(),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       Text('Dibayar: Rp $cashPaid'),
+                      if (selectedBreakdown.isNotEmpty)
+                        Text(
+                          selectedBreakdown.join(', '),
+                          style: TextStyle(color: Colors.grey.shade700),
+                        ),
                       Text(
                         'Kembalian: Rp ${change > 0 ? change.toStringAsFixed(0) : '0'}',
                       ),
                       const SizedBox(height: 6),
-                      TextButton(
-                        onPressed: selectedCash.isEmpty
-                            ? null
-                            : () {
-                                setState(() {
-                                  selectedCash = [...selectedCash]
-                                    ..removeLast();
-                                });
-                              },
-                        child: const Text('Undo nominal terakhir'),
-                      ),
                     ] else ...[
                       Container(
                         width: double.infinity,
@@ -1269,7 +2032,32 @@ class _ProductListScreenState extends State<ProductListScreen> {
                 ElevatedButton(
                   onPressed: paymentMethod == 'cash' && cashPaid < totalAmount
                       ? null
-                      : () => Navigator.of(dialogContext).pop(paymentMethod),
+                      : () {
+                          final normalizedTotal = totalAmount % 1 == 0
+                              ? totalAmount.toInt()
+                              : totalAmount;
+                          final cashBreakdown = paymentMethod == 'cash'
+                              ? selectedCashCounts.map(
+                                  (key, value) =>
+                                      MapEntry(key.toString(), value),
+                                )
+                              : null;
+                          final totalPaymentReceived = paymentMethod == 'cash'
+                              ? cashPaid
+                              : normalizedTotal;
+                          final changeAmount = paymentMethod == 'cash'
+                              ? (cashPaid - totalAmount)
+                              : 0;
+
+                          Navigator.of(dialogContext).pop(
+                            _PaymentResult(
+                              method: paymentMethod,
+                              totalPaymentReceived: totalPaymentReceived,
+                              cashNominalBreakdown: cashBreakdown,
+                              changeAmount: changeAmount,
+                            ),
+                          );
+                        },
                   child: const Text('Confirm Payment'),
                 ),
               ],
@@ -1352,7 +2140,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                     final source = order['order_source']?.toString() ?? '-';
                     return ListTile(
                       title: Text('Order #$orderId - $customerName'),
-                      subtitle: Text('Total: Rp $total • Source: $source'),
+                      subtitle: Text(
+                        'Total: ${_formatRupiah((total as num?) ?? 0)} • Source: $source',
+                      ),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () async {
                         final canContinue = await _handleDraftBeforeSwitch(
@@ -1410,7 +2200,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
 
       if (!mounted) return false;
       setState(() {
-        _checkedCartItems.clear();
+        _selectedCartItems.clear();
+        _isCartSelectionMode = false;
+        _pendingParentOrderIdForNextSubmit = null;
       });
       return true;
     }
@@ -1425,6 +2217,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
           customerName: _customerName,
           tableName: _tableName,
           orderType: _orderType,
+          parentOrderId: _pendingParentOrderIdForNextSubmit,
         );
       } catch (error) {
         if (!mounted) return false;
@@ -1437,7 +2230,10 @@ class _ProductListScreenState extends State<ProductListScreen> {
       if (!mounted) return false;
 
       setState(() {
-        _checkedCartItems.clear();
+        _selectedCartItems.clear();
+        _selectedCartItems.clear();
+        _isCartSelectionMode = false;
+        _pendingParentOrderIdForNextSubmit = null;
       });
 
       return true;
@@ -1503,12 +2299,10 @@ class _ProductListScreenState extends State<ProductListScreen> {
       _customerName = order['customer_name']?.toString();
       _orderType = order['type']?.toString() ?? _orderType;
       final notes = order['notes']?.toString();
-      if (notes != null && notes.startsWith('Table:')) {
-        _tableName = notes.replaceFirst('Table:', '').trim();
-      } else {
-        _tableName = null;
-      }
-      _checkedCartItems.clear();
+      _tableName = _tableNameFromNotes(notes);
+      _selectedCartItems.clear();
+      _isCartSelectionMode = false;
+      _pendingParentOrderIdForNextSubmit = null;
     });
 
     ScaffoldMessenger.of(
@@ -1549,7 +2343,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                         order['total_price'] ?? order['total_amount'] ?? 0;
                     return ListTile(
                       title: Text('Order #$orderId - $customerName'),
-                      subtitle: Text('Total: Rp $totalPrice'),
+                      subtitle: Text(
+                        'Total: ${_formatRupiah((totalPrice as num?) ?? 0)}',
+                      ),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () {
                         _showOrderDetailModal(order);
@@ -1606,7 +2402,13 @@ class _ProductListScreenState extends State<ProductListScreen> {
                           })(),
                         ),
                         trailing: Text(
-                          'Rp ${((item.product.price + _modifierExtraFromData(item.modifiersData)) * item.quantity).toStringAsFixed(0)}',
+                          _formatRupiah(
+                            ((item.product.price +
+                                    _modifierExtraFromData(
+                                      item.modifiersData,
+                                    )) *
+                                item.quantity),
+                          ),
                         ),
                       );
                     },
@@ -1726,6 +2528,29 @@ class _ProductListScreenState extends State<ProductListScreen> {
       final name = group['name']?.toString();
       if (id != null && name != null && name.isNotEmpty) {
         lookup[id] = name;
+      }
+    }
+
+    return lookup;
+  }
+
+  Map<String, double> _modifierOptionPriceByNameLookup(Product product) {
+    final lookup = <String, double>{};
+    final groups = product.productModifiers;
+    if (groups == null) {
+      return lookup;
+    }
+
+    for (final group in groups.whereType<Map<String, dynamic>>()) {
+      final options =
+          (group['options'] as List<dynamic>?) ??
+          (group['modifier_options'] as List<dynamic>?) ??
+          <dynamic>[];
+      for (final option in options.whereType<Map<String, dynamic>>()) {
+        final name = option['name']?.toString();
+        if (name != null && name.isNotEmpty) {
+          lookup[name] = (option['price'] as num?)?.toDouble() ?? 0;
+        }
       }
     }
 
@@ -1868,9 +2693,37 @@ class _ProductListScreenState extends State<ProductListScreen> {
     }
 
     if (normalized is Map<String, dynamic>) {
-      if (normalized['selected_options'] != null ||
-          normalized['selections'] != null) {
+      if (normalized['selected_options'] != null) {
         return [normalized];
+      }
+
+      if (normalized['selections'] is Map<String, dynamic>) {
+        final optionPriceByName = _modifierOptionPriceByNameLookup(product);
+        final selections =
+            normalized['selections'] as Map<String, dynamic>? ??
+            <String, dynamic>{};
+        final list = <Map<String, dynamic>>[];
+
+        for (final entry in selections.entries) {
+          final selectedOptions = (entry.value as List<dynamic>? ?? <dynamic>[])
+              .map((value) => value.toString())
+              .where((name) => name.isNotEmpty)
+              .map(
+                (name) => {'name': name, 'price': optionPriceByName[name] ?? 0},
+              )
+              .toList();
+
+          if (selectedOptions.isEmpty) {
+            continue;
+          }
+
+          list.add({
+            'modifier_name': entry.key,
+            'selected_options': selectedOptions,
+          });
+        }
+
+        return list.isEmpty ? null : list;
       }
 
       final groupNameLookup = _modifierGroupNameLookup(product);
@@ -1918,6 +2771,20 @@ class _ProductListScreenState extends State<ProductListScreen> {
     final updatedRows = response as List<dynamic>;
     return updatedRows.isNotEmpty;
   }
+}
+
+class _PaymentResult {
+  final String method;
+  final num totalPaymentReceived;
+  final Map<String, int>? cashNominalBreakdown;
+  final num changeAmount;
+
+  _PaymentResult({
+    required this.method,
+    required this.totalPaymentReceived,
+    required this.cashNominalBreakdown,
+    required this.changeAmount,
+  });
 }
 
 class _OnlineOrderItem {
