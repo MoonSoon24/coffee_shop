@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:coffee_shop/core/constants/order_status.dart';
 import 'package:coffee_shop/core/services/supabase_client.dart';
@@ -8,6 +10,7 @@ import 'package:coffee_shop/features/cashier/providers/cart_provider.dart';
 import 'package:coffee_shop/features/printing/presentation/dialogs/printer_settings_dialog.dart';
 import 'package:coffee_shop/features/printing/services/thermal_printer_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -43,6 +46,8 @@ class _ProductListScreenState extends State<ProductListScreen> {
   String? _customerName;
   String? _tableName;
   int? _currentActiveOrderId;
+  int? _activeShiftId;
+  int? _activeCashierId;
   final Set<String> _selectedCartItems = <String>{};
   bool _isCartSelectionMode = false;
   int? _pendingParentOrderIdForNextSubmit;
@@ -56,10 +61,21 @@ class _ProductListScreenState extends State<ProductListScreen> {
       _onlineOrdersRepository.pendingOnlineOrdersStream();
 
   Stream<List<Map<String, dynamic>>> get _activeOrdersStream =>
-      _cashierRepository.activeOrdersStream();
+      _cashierRepository.activeOrdersStream(
+        cashierId: _activeCashierId,
+        shiftId: _activeShiftId,
+      );
 
-  Stream<List<Map<String, dynamic>>> get _allOrdersStream =>
-      _cashierRepository.allOrdersStream();
+  Stream<List<Map<String, dynamic>>> get _allOrdersStream => _cashierRepository
+      .allOrdersStream(cashierId: _activeCashierId, shiftId: _activeShiftId);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _syncShiftContext();
+    });
+  }
 
   @override
   void dispose() {
@@ -104,8 +120,44 @@ class _ProductListScreenState extends State<ProductListScreen> {
                           );
                         }
                         if (snapshot.hasError) {
+                          final errorText = snapshot.error.toString();
+                          final isPolicyError =
+                              errorText.contains('row-level security') ||
+                              errorText.contains('permission denied') ||
+                              errorText.contains('not authorized') ||
+                              errorText.contains('42501');
+
                           return Center(
-                            child: Text('Error: ${snapshot.error}'),
+                            child: Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.lock_outline,
+                                    size: 40,
+                                    color: Colors.orange,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    isPolicyError
+                                        ? 'Data cannot be read because Supabase Row Level Security policy blocks this client.'
+                                        : 'Error loading menu data.',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    isPolicyError
+                                        ? 'Fix by updating Supabase RLS SELECT policies so this app client is allowed to read products/orders.'
+                                        : errorText,
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            ),
                           );
                         }
                         if (!snapshot.hasData || snapshot.data!.isEmpty) {
@@ -775,6 +827,8 @@ class _ProductListScreenState extends State<ProductListScreen> {
       'change_amount': null,
       'customer_name': customerName,
       'parent_order_id': parentOrderId,
+      'cashier_id': _activeCashierId,
+      'shift_id': _activeShiftId,
       'notes': _buildOrderNotes(tableName: tableName, extraNote: extraNote),
     });
 

@@ -2,14 +2,37 @@ part of '../presentation/screens/cashier_screen.dart';
 
 extension CashierControllerMethods on _ProductListScreenState {
   Future<List<Map<String, dynamic>>> _fetchOtherActiveOrders() async {
+    if (_activeCashierId == null) {
+      return const <Map<String, dynamic>>[];
+    }
+
     final rows = await supabase
         .from('orders')
-        .select('id, customer_name, total_price, order_source, type, notes')
+        .select(
+          'id, customer_name, total_price, order_source, type, notes, cashier_id, shift_id',
+        )
         .eq('status', 'active')
         .neq('id', _currentActiveOrderId ?? -1)
         .order('created_at');
 
-    return (rows as List<dynamic>).whereType<Map<String, dynamic>>().toList();
+    return (rows as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .where((row) {
+          final rowCashierId = (row['cashier_id'] as num?)?.toInt();
+          final rowShiftId = (row['shift_id'] as num?)?.toInt();
+          final matchesShift = _activeShiftId == null
+              ? true
+              : rowShiftId == _activeShiftId;
+          final fallbackLegacyCashierMatch =
+              _activeShiftId != null &&
+              rowShiftId == null &&
+              rowCashierId == _activeCashierId;
+          final matchesCashier = _activeShiftId == null
+              ? rowCashierId == _activeCashierId
+              : true;
+          return (matchesShift && matchesCashier) || fallbackLegacyCashierMatch;
+        })
+        .toList(growable: false);
   }
 
   Future<List<Map<String, dynamic>>> _fetchOrderItemRows(int orderId) async {
