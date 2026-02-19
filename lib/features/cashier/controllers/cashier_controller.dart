@@ -683,6 +683,8 @@ extension CashierControllerMethods on _ProductListScreenState {
           tableName: _tableName,
           orderType: _orderType,
           parentOrderId: _pendingParentOrderIdForNextSubmit,
+          cashierId: _activeCashierId,
+          shiftId: _activeShiftId,
         );
       } catch (error) {
         if (!mounted) return false;

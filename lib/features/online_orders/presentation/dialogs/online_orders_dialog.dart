@@ -68,6 +68,10 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
     String selectedStatus = 'all';
     int? selectedOrderId;
 
+    final offlinePending = await context
+        .read<CartProvider>()
+        .getPendingOfflineOrders();
+
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
@@ -81,7 +85,19 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
                 child: StreamBuilder<List<Map<String, dynamic>>>(
                   stream: _allOrdersStream,
                   builder: (context, snapshot) {
-                    final rawOrders = snapshot.data ?? <Map<String, dynamic>>[];
+                    final remoteOrders =
+                        snapshot.data ?? <Map<String, dynamic>>[];
+                    final hasRemoteError = snapshot.hasError;
+                    final offlineOrders = offlinePending
+                        .map(
+                          (pending) => Map<String, dynamic>.from(
+                            pending['order'] as Map,
+                          ),
+                        )
+                        .toList(growable: false);
+                    final rawOrders = hasRemoteError
+                        ? offlineOrders
+                        : remoteOrders;
                     final normalizedSearch = searchQuery.trim().toLowerCase();
 
                     final filtered = rawOrders
@@ -205,6 +221,15 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
 
                     return Column(
                       children: [
+                        if (snapshot.hasError)
+                          Container(
+                            width: double.infinity,
+                            color: Colors.orange.shade100,
+                            padding: const EdgeInsets.all(10),
+                            child: const Text(
+                              'Offline mode: showing locally queued orders only.',
+                            ),
+                          ),
                         Container(
                           padding: const EdgeInsets.all(16),
                           decoration: BoxDecoration(
@@ -550,42 +575,44 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Online Pending Orders'),
-          content: SizedBox(
-            width: 900,
-            height: 560,
-            child: StreamBuilder<List<Map<String, dynamic>>>(
-              stream: _onlinePendingOrdersStream,
-              builder: (context, snapshot) {
-                final pendingOrders = snapshot.data ?? <Map<String, dynamic>>[];
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Online Pending Orders'),
+              content: SizedBox(
+                width: 900,
+                height: 560,
+                child: StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: _onlinePendingOrdersStream,
+                  builder: (context, snapshot) {
+                    final pendingOrders =
+                        snapshot.data ?? <Map<String, dynamic>>[];
 
-                if (selectedOrderId != null &&
-                    pendingOrders.every(
-                      (order) =>
-                          (order['id'] as num?)?.toInt() != selectedOrderId,
-                    )) {
-                  selectedOrderId = null;
-                }
-                selectedOrderId ??= pendingOrders.isEmpty
-                    ? null
-                    : (pendingOrders.first['id'] as num?)?.toInt();
+                    if (selectedOrderId != null &&
+                        pendingOrders.every(
+                          (order) =>
+                              (order['id'] as num?)?.toInt() != selectedOrderId,
+                        )) {
+                      selectedOrderId = null;
+                    }
+                    selectedOrderId ??= pendingOrders.isEmpty
+                        ? null
+                        : (pendingOrders.first['id'] as num?)?.toInt();
 
-                final selectedOrder = selectedOrderId == null
-                    ? null
-                    : pendingOrders.firstWhere(
-                        (order) =>
-                            (order['id'] as num?)?.toInt() == selectedOrderId,
-                        orElse: () => <String, dynamic>{},
-                      );
+                    final selectedOrder = selectedOrderId == null
+                        ? null
+                        : pendingOrders.firstWhere(
+                            (order) =>
+                                (order['id'] as num?)?.toInt() ==
+                                selectedOrderId,
+                            orElse: () => <String, dynamic>{},
+                          );
 
-                if (snapshot.connectionState == ConnectionState.waiting &&
-                    pendingOrders.isEmpty) {
-                  return const Center(child: CircularProgressIndicator());
-                }
+                    if (snapshot.connectionState == ConnectionState.waiting &&
+                        pendingOrders.isEmpty) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
 
-                return StatefulBuilder(
-                  builder: (context, setDialogState) {
                     return Row(
                       children: [
                         Container(
@@ -697,7 +724,7 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
                                                         subtitle: Text(
                                                           modifierText.isEmpty
                                                               ? 'Qty: ${item.quantity}'
-                                                              : 'Qty: ${item.quantity}\n$modifierText',
+                                                              : 'Qty: ${item.quantity}$modifierText',
                                                         ),
                                                         trailing: Text(
                                                           _formatRupiah(
@@ -777,8 +804,9 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
                                                       });
 
                                                       if (!dialogContext
-                                                          .mounted)
+                                                          .mounted) {
                                                         return;
+                                                      }
                                                       Navigator.of(
                                                         dialogContext,
                                                       ).pop();
@@ -798,16 +826,16 @@ extension OnlineOrdersDialogMethods on _ProductListScreenState {
                       ],
                     );
                   },
-                );
-              },
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Close'),
-            ),
-          ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
         );
       },
     );

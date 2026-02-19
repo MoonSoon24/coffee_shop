@@ -5,35 +5,13 @@ class CashierRepository {
     required int? cashierId,
     required int? shiftId,
   }) {
-    if (cashierId == null) {
-      return Stream<List<Map<String, dynamic>>>.value(
-        const <Map<String, dynamic>>[],
-      );
-    }
-
     return supabase
         .from('orders')
         .stream(primaryKey: ['id'])
         .order('created_at', ascending: false)
         .map(
           (rows) => rows
-              .where((row) {
-                final rowCashierId = (row['cashier_id'] as num?)?.toInt();
-                final rowShiftId = (row['shift_id'] as num?)?.toInt();
-
-                final matchesShift = shiftId == null
-                    ? true
-                    : rowShiftId == shiftId;
-                final fallbackLegacyCashierMatch =
-                    shiftId != null &&
-                    rowShiftId == null &&
-                    rowCashierId == cashierId;
-                final matchesCashier = shiftId == null
-                    ? rowCashierId == cashierId
-                    : true;
-                return (matchesShift && matchesCashier) ||
-                    fallbackLegacyCashierMatch;
-              })
+              .map((row) => Map<String, dynamic>.from(row))
               .toList(growable: false),
         );
   }
@@ -42,36 +20,14 @@ class CashierRepository {
     required int? cashierId,
     required int? shiftId,
   }) {
-    if (cashierId == null) {
-      return Stream<List<Map<String, dynamic>>>.value(
-        const <Map<String, dynamic>>[],
-      );
-    }
-
     return supabase
         .from('orders')
         .stream(primaryKey: ['id'])
         .order('created_at')
         .map(
           (rows) => rows
-              .where((row) {
-                final rowCashierId = (row['cashier_id'] as num?)?.toInt();
-                final rowShiftId = (row['shift_id'] as num?)?.toInt();
-
-                final matchesShift = shiftId == null
-                    ? true
-                    : rowShiftId == shiftId;
-                final fallbackLegacyCashierMatch =
-                    shiftId != null &&
-                    rowShiftId == null &&
-                    rowCashierId == cashierId;
-                final matchesCashier = shiftId == null
-                    ? rowCashierId == cashierId
-                    : true;
-                return row['status'] == 'active' &&
-                    ((matchesShift && matchesCashier) ||
-                        fallbackLegacyCashierMatch);
-              })
+              .where((row) => row['status'] == 'active')
+              .map((row) => Map<String, dynamic>.from(row))
               .toList(growable: false),
         );
   }
@@ -81,10 +37,6 @@ class CashierRepository {
     required int? cashierId,
     required int? shiftId,
   }) async {
-    if (cashierId == null) {
-      return const <Map<String, dynamic>>[];
-    }
-
     final rows = await supabase
         .from('orders')
         .select(
@@ -95,20 +47,8 @@ class CashierRepository {
         .order('created_at');
 
     return (rows as List<dynamic>)
-        .whereType<Map<String, dynamic>>()
-        .where((row) {
-          final rowCashierId = (row['cashier_id'] as num?)?.toInt();
-          final rowShiftId = (row['shift_id'] as num?)?.toInt();
-          final matchesShift = shiftId == null ? true : rowShiftId == shiftId;
-          final fallbackLegacyCashierMatch =
-              shiftId != null &&
-              rowShiftId == null &&
-              rowCashierId == cashierId;
-          final matchesCashier = shiftId == null
-              ? rowCashierId == cashierId
-              : true;
-          return (matchesShift && matchesCashier) || fallbackLegacyCashierMatch;
-        })
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
         .toList(growable: false);
   }
 }

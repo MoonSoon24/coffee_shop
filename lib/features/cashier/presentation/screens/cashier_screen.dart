@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:convert';
 import 'dart:math';
 
 import 'package:coffee_shop/core/constants/order_status.dart';
@@ -10,10 +9,12 @@ import 'package:coffee_shop/features/cashier/providers/cart_provider.dart';
 import 'package:coffee_shop/features/printing/presentation/dialogs/printer_settings_dialog.dart';
 import 'package:coffee_shop/features/printing/services/thermal_printer_service.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:sqflite/sqflite.dart';
 
 part '../../controllers/cashier_controller.dart';
 part '../widgets/cashier_app_bar.dart';
@@ -25,6 +26,7 @@ part '../../../online_orders/presentation/dialogs/order_detail_dialog.dart';
 part '../../models/payment_result.dart';
 part '../../models/modifier_selection_result.dart';
 part '../../data/cashier_repository.dart';
+part '../../data/product_catalog_repository.dart';
 part '../../../online_orders/data/online_orders_repository.dart';
 
 class ProductListScreen extends StatefulWidget {
@@ -35,13 +37,11 @@ class ProductListScreen extends StatefulWidget {
 }
 
 class _ProductListScreenState extends State<ProductListScreen> {
-  final Future<List<Product>> _future = supabase.from('products').select().then(
-    (data) {
-      return data.map((item) => Product.fromJson(item)).toList();
-    },
-  );
+  late Future<List<Product>> _future;
 
   String? _selectedCategory;
+  final Set<String> _hiddenMenuCategories = <String>{};
+  String _menuLayout = 'grid_4';
   String _orderType = 'dine_in';
   String? _customerName;
   String? _tableName;
@@ -54,17 +54,23 @@ class _ProductListScreenState extends State<ProductListScreen> {
   OverlayEntry? _snackbarOverlayEntry;
   AnimationController? _snackbarAnimationController;
   final CashierRepository _cashierRepository = CashierRepository();
+  final ProductCatalogRepository _productCatalogRepository =
+      ProductCatalogRepository();
   final OnlineOrdersRepository _onlineOrdersRepository =
       OnlineOrdersRepository();
 
   Stream<List<Map<String, dynamic>>> get _onlinePendingOrdersStream =>
-      _onlineOrdersRepository.pendingOnlineOrdersStream();
+      _activeShiftId == null
+      ? Stream<List<Map<String, dynamic>>>.value(const <Map<String, dynamic>>[])
+      : _onlineOrdersRepository.pendingOnlineOrdersStream();
 
   Stream<List<Map<String, dynamic>>> get _activeOrdersStream =>
-      _cashierRepository.activeOrdersStream(
-        cashierId: _activeCashierId,
-        shiftId: _activeShiftId,
-      );
+      _activeShiftId == null
+      ? Stream<List<Map<String, dynamic>>>.value(const <Map<String, dynamic>>[])
+      : _cashierRepository.activeOrdersStream(
+          cashierId: _activeCashierId,
+          shiftId: _activeShiftId,
+        );
 
   Stream<List<Map<String, dynamic>>> get _allOrdersStream => _cashierRepository
       .allOrdersStream(cashierId: _activeCashierId, shiftId: _activeShiftId);
@@ -72,6 +78,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
   @override
   void initState() {
     super.initState();
+    _future = _loadProducts();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _syncShiftContext();
     });
@@ -82,6 +89,21 @@ class _ProductListScreenState extends State<ProductListScreen> {
     _snackbarAnimationController?.dispose();
     _snackbarOverlayEntry?.remove();
     super.dispose();
+  }
+
+  Future<List<Product>> _loadProducts() async {
+    try {
+      final data = await supabase.from('products').select();
+      final products = (data as List<dynamic>)
+          .whereType<Map>()
+          .map((item) => Product.fromJson(Map<String, dynamic>.from(item)))
+          .toList(growable: false);
+      await _productCatalogRepository.saveProducts(products);
+      return products;
+    } catch (_) {
+      final cached = await _productCatalogRepository.loadCachedProducts();
+      return cached;
+    }
   }
 
   @override
@@ -104,7 +126,18 @@ class _ProductListScreenState extends State<ProductListScreen> {
                         value: 'refresh',
                         child: Text('Refresh menu'),
                       ),
+                      PopupMenuItem(
+                        value: 'view_settings',
+                        child: Text('View settings'),
+                      ),
                     ],
+                    onSelected: (value) async {
+                      if (value == 'refresh') {
+                        setState(() => _future = _loadProducts());
+                      } else if (value == 'view_settings') {
+                        await _showMenuViewSettingsDialog();
+                      }
+                    },
                   ),
                 ),
                 Expanded(
@@ -167,39 +200,38 @@ class _ProductListScreenState extends State<ProductListScreen> {
                         }
 
                         final products = snapshot.data!;
+                        final visibleProducts = products
+                            .where(
+                              (product) => !_hiddenMenuCategories.contains(
+                                product.category,
+                              ),
+                            )
+                            .toList(growable: false);
                         final categories =
-                            products
+                            visibleProducts
                                 .map((product) => product.category)
                                 .toSet()
                                 .toList()
                               ..sort();
-                        final filteredProducts = _selectedCategory == null
-                            ? products
-                            : products
+                        final effectiveSelectedCategory =
+                            categories.contains(_selectedCategory)
+                            ? _selectedCategory
+                            : null;
+                        final filteredProducts =
+                            effectiveSelectedCategory == null
+                            ? visibleProducts
+                            : visibleProducts
                                   .where(
                                     (product) =>
-                                        product.category == _selectedCategory,
+                                        product.category ==
+                                        effectiveSelectedCategory,
                                   )
-                                  .toList();
+                                  .toList(growable: false);
 
                         return Column(
                           children: [
                             Expanded(
-                              child: GridView.builder(
-                                padding: const EdgeInsets.all(16.0),
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: 4,
-                                      childAspectRatio: 4 / 3,
-                                      crossAxisSpacing: 12,
-                                      mainAxisSpacing: 12,
-                                    ),
-                                itemCount: filteredProducts.length,
-                                itemBuilder: (context, index) {
-                                  final product = filteredProducts[index];
-                                  return _buildProductCard(product);
-                                },
-                              ),
+                              child: _buildMenuLayoutContent(filteredProducts),
                             ),
                             SizedBox(
                               height: 56,
@@ -216,7 +248,8 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                     ),
                                     child: ChoiceChip(
                                       label: const Text('All'),
-                                      selected: _selectedCategory == null,
+                                      selected:
+                                          effectiveSelectedCategory == null,
                                       onSelected: (_) => setState(
                                         () => _selectedCategory = null,
                                       ),
@@ -230,7 +263,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                       ),
                                       child: ChoiceChip(
                                         label: Text(category),
-                                        selected: _selectedCategory == category,
+                                        selected:
+                                            effectiveSelectedCategory ==
+                                            category,
                                         onSelected: (_) => setState(
                                           () => _selectedCategory = category,
                                         ),
@@ -483,6 +518,13 @@ class _ProductListScreenState extends State<ProductListScreen> {
                               onPressed: cart.items.isEmpty
                                   ? null
                                   : () async {
+                                      if (_activeShiftId == null) {
+                                        _showDropdownSnackbar(
+                                          'No open shift. Please open a shift first.',
+                                          isError: true,
+                                        );
+                                        return;
+                                      }
                                       final payment =
                                           await _showPaymentMethodModal(
                                             cart.totalAmount,
@@ -573,20 +615,24 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                             status: 'completed',
                                             parentOrderId:
                                                 _pendingParentOrderIdForNextSubmit,
+                                            cashierId: _activeCashierId,
+                                            shiftId: _activeShiftId,
                                           );
                                         }
-                                        await ThermalPrinterService.instance
-                                            .printPaymentReceipt(
-                                              orderId: paidOrderId!,
-                                              lines: receiptItems,
-                                              total: totalBeforeSubmit,
-                                              paymentMethod: payment.method,
-                                              paid:
-                                                  payment.totalPaymentReceived,
-                                              change: payment.changeAmount,
-                                              customerName: _customerName,
-                                              tableName: _tableName,
-                                            );
+                                        if ((paidOrderId ?? 0) > 0) {
+                                          await ThermalPrinterService.instance
+                                              .printPaymentReceipt(
+                                                orderId: paidOrderId!,
+                                                lines: receiptItems,
+                                                total: totalBeforeSubmit,
+                                                paymentMethod: payment.method,
+                                                paid: payment
+                                                    .totalPaymentReceived,
+                                                change: payment.changeAmount,
+                                                customerName: _customerName,
+                                                tableName: _tableName,
+                                              );
+                                        }
                                       } catch (error) {
                                         if (!context.mounted) return;
                                         if (paidOrderId != null) {
@@ -607,7 +653,9 @@ class _ProductListScreenState extends State<ProductListScreen> {
                                         showMessage: false,
                                       );
                                       _showDropdownSnackbar(
-                                        'Payment success (${payment.method})',
+                                        (paidOrderId ?? 0) > 0
+                                            ? 'Payment success (${payment.method})'
+                                            : 'Offline saved. Sync later from app menu.',
                                       );
                                     },
                               style: ElevatedButton.styleFrom(
@@ -626,6 +674,156 @@ class _ProductListScreenState extends State<ProductListScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildMenuLayoutContent(List<Product> filteredProducts) {
+    if (_menuLayout == 'list') {
+      return ListView.separated(
+        padding: const EdgeInsets.all(12),
+        itemCount: filteredProducts.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (context, index) {
+          final product = filteredProducts[index];
+          return Card(
+            child: ListTile(
+              title: Text(product.name),
+              subtitle: Text(product.category),
+              trailing: Text(_formatRupiah(product.price)),
+              onTap: () => _onProductTap(product),
+            ),
+          );
+        },
+      );
+    }
+
+    final crossAxisCount = _menuLayout == 'grid_3'
+        ? 3
+        : _menuLayout == 'grid_5'
+        ? 5
+        : 4;
+
+    return GridView.builder(
+      padding: const EdgeInsets.all(16.0),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: crossAxisCount,
+        childAspectRatio: 4 / 3,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+      ),
+      itemCount: filteredProducts.length,
+      itemBuilder: (context, index) {
+        final product = filteredProducts[index];
+        return _buildProductCard(product);
+      },
+    );
+  }
+
+  Future<void> _showMenuViewSettingsDialog() async {
+    final products = await _future;
+    if (!mounted) return;
+
+    final categories =
+        products.map((product) => product.category).toSet().toList()..sort();
+
+    final tempHiddenCategories = Set<String>.from(_hiddenMenuCategories);
+    var tempLayout = _menuLayout;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Menu view settings'),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Visible categories',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  ...categories.map((category) {
+                    final visible = !tempHiddenCategories.contains(category);
+                    return CheckboxListTile(
+                      value: visible,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(category),
+                      onChanged: (value) {
+                        setDialogState(() {
+                          if (value == true) {
+                            tempHiddenCategories.remove(category);
+                          } else {
+                            tempHiddenCategories.add(category);
+                          }
+                        });
+                      },
+                    );
+                  }),
+                  const Divider(height: 24),
+                  const Text(
+                    'Layout',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  RadioListTile<String>(
+                    value: 'list',
+                    groupValue: tempLayout,
+                    title: const Text('List product layout'),
+                    onChanged: (value) =>
+                        setDialogState(() => tempLayout = value ?? 'list'),
+                  ),
+                  RadioListTile<String>(
+                    value: 'grid_3',
+                    groupValue: tempLayout,
+                    title: const Text('3 x 3 product grid'),
+                    onChanged: (value) =>
+                        setDialogState(() => tempLayout = value ?? 'grid_3'),
+                  ),
+                  RadioListTile<String>(
+                    value: 'grid_4',
+                    groupValue: tempLayout,
+                    title: const Text('4 x 4 product grid'),
+                    onChanged: (value) =>
+                        setDialogState(() => tempLayout = value ?? 'grid_4'),
+                  ),
+                  RadioListTile<String>(
+                    value: 'grid_5',
+                    groupValue: tempLayout,
+                    title: const Text('5 x 5 product grid'),
+                    onChanged: (value) =>
+                        setDialogState(() => tempLayout = value ?? 'grid_5'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _hiddenMenuCategories
+                    ..clear()
+                    ..addAll(tempHiddenCategories);
+                  _menuLayout = tempLayout;
+                  if (_selectedCategory != null &&
+                      _hiddenMenuCategories.contains(_selectedCategory)) {
+                    _selectedCategory = null;
+                  }
+                });
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('Apply'),
+            ),
+          ],
+        ),
       ),
     );
   }
