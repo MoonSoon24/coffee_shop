@@ -9,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
 import '/features/cashier/models/models.dart';
+import 'package:coffee_shop/core/services/local_order_store_repository.dart';
 import '../data/offline_order_queue_repository.dart';
 
 class CartProvider extends ChangeNotifier {
@@ -67,6 +68,25 @@ class CartProvider extends ChangeNotifier {
     return _offlineRepo.getPendingOrders();
   }
 
+  Future<List<Map<String, dynamic>>> getFailedOfflineOrders() async {
+    await _offlineRepo.init();
+    return _offlineRepo.getFailedOrders();
+  }
+
+  Future<void> retryFailedOfflineOrder(String localTxnId) async {
+    await _offlineRepo.init();
+    await _offlineRepo.retryFailed(localTxnId);
+    await _refreshOfflineCounters();
+    notifyListeners();
+  }
+
+  Future<void> deleteFailedOfflineOrder(String localTxnId) async {
+    await _offlineRepo.init();
+    await _offlineRepo.deleteFailed(localTxnId);
+    await _refreshOfflineCounters();
+    notifyListeners();
+  }
+
   Future<int> syncOfflineOrders() async {
     if (_isSyncing) return 0;
     await _offlineRepo.init();
@@ -93,6 +113,9 @@ class CartProvider extends ChangeNotifier {
 
         try {
           await _submitOfflinePayload(supabase, payload);
+          await LocalOrderStoreRepository.instance.upsertOrder(
+            Map<String, dynamic>.from(payload['order'] as Map),
+          );
           await _offlineRepo.removePending(localTxnId);
           synced++;
         } catch (error) {
@@ -128,18 +151,38 @@ class CartProvider extends ChangeNotifier {
         .map((row) => Map<String, dynamic>.from(row))
         .toList(growable: false);
 
-    final existing = await supabase
-        .from('orders')
-        .select('id')
-        .ilike('notes', '%client_txn_id:$localTxnId%')
-        .limit(1);
+    dynamic existing;
+    try {
+      existing = await supabase
+          .from('orders')
+          .select('id')
+          .or(
+            'notes.ilike.%client_txn_id:$localTxnId%,idempotency_key.eq.$localTxnId',
+          )
+          .limit(1);
+    } catch (_) {
+      existing = await supabase
+          .from('orders')
+          .select('id')
+          .ilike('notes', '%client_txn_id:$localTxnId%')
+          .limit(1);
+    }
     if (existing is List && existing.isNotEmpty) {
       return;
     }
 
     for (var attempt = 0; attempt < 5; attempt++) {
       try {
-        await supabase.from('orders').insert(order);
+        try {
+          await supabase.from('orders').insert(order);
+        } on PostgrestException catch (error) {
+          if (error.message.toLowerCase().contains('idempotency_key')) {
+            order.remove('idempotency_key');
+            await supabase.from('orders').insert(order);
+          } else {
+            rethrow;
+          }
+        }
         await supabase.from('order_items').insert(items);
         return;
       } on PostgrestException catch (error) {
@@ -468,15 +511,29 @@ class CartProvider extends ChangeNotifier {
           'cashier_id': cashierId,
           'shift_id': shiftId,
           'notes': composeNotes(),
+          'idempotency_key': localTxnId,
         };
         orderPayload = Map<String, dynamic>.from(payload);
 
         try {
-          orderResponse = await supabase
-              .from('orders')
-              .insert(payload)
-              .select()
-              .single();
+          try {
+            orderResponse = await supabase
+                .from('orders')
+                .insert(payload)
+                .select()
+                .single();
+          } on PostgrestException catch (error) {
+            if (error.message.toLowerCase().contains('idempotency_key')) {
+              payload.remove('idempotency_key');
+              orderResponse = await supabase
+                  .from('orders')
+                  .insert(payload)
+                  .select()
+                  .single();
+            } else {
+              rethrow;
+            }
+          }
           break;
         } on PostgrestException catch (error) {
           final isDuplicateId =
@@ -507,6 +564,7 @@ class CartProvider extends ChangeNotifier {
           .toList(growable: false);
 
       await supabase.from('order_items').insert(orderItems);
+      await LocalOrderStoreRepository.instance.upsertOrder(orderResponse);
 
       clearCart();
       return orderId;
@@ -532,6 +590,7 @@ class CartProvider extends ChangeNotifier {
           'cashier_id': cashierId,
           'shift_id': shiftId,
           'notes': composeNotes(),
+          'idempotency_key': localTxnId,
         };
       }
 
@@ -557,6 +616,7 @@ class CartProvider extends ChangeNotifier {
         'items': orderItems,
       });
 
+      await LocalOrderStoreRepository.instance.upsertOrder(orderPayload);
       await _refreshOfflineCounters();
       notifyListeners();
       clearCart();

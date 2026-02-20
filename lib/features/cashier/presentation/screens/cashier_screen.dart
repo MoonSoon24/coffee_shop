@@ -1,14 +1,19 @@
 import 'dart:convert';
 import 'dart:math';
+import 'dart:io';
 
 import 'package:coffee_shop/core/constants/order_status.dart';
 import 'package:coffee_shop/core/services/supabase_client.dart';
+import 'package:coffee_shop/core/services/order_sync_service.dart';
+import 'package:coffee_shop/core/services/local_order_store_repository.dart';
 import 'package:coffee_shop/core/utils/formatters.dart';
 import 'package:coffee_shop/features/cashier/models/models.dart';
 import 'package:coffee_shop/features/cashier/providers/cart_provider.dart';
+import 'package:coffee_shop/features/cashier/data/offline_shift_repository.dart';
 import 'package:coffee_shop/features/printing/presentation/dialogs/printer_settings_dialog.dart';
 import 'package:coffee_shop/features/printing/services/thermal_printer_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
@@ -79,6 +84,8 @@ class _ProductListScreenState extends State<ProductListScreen> {
   void initState() {
     super.initState();
     _future = _loadProducts();
+    LocalOrderStoreRepository.instance.init();
+    OrderSyncService.instance.start();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _syncShiftContext();
     });

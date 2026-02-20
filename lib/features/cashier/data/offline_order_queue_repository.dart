@@ -75,6 +75,55 @@ class OfflineOrderQueueRepository {
         .toList(growable: false);
   }
 
+  Future<List<Map<String, dynamic>>> getFailedOrders() async {
+    final rows = await _database.query(failedTable, orderBy: 'failed_at DESC');
+
+    return rows
+        .map((row) {
+          final payload = jsonDecode(row['payload_json'] as String);
+          return Map<String, dynamic>.from(payload as Map);
+        })
+        .toList(growable: false);
+  }
+
+  Future<void> retryFailed(String localTxnId) async {
+    await _database.transaction((txn) async {
+      final rows = await txn.query(
+        failedTable,
+        where: 'local_txn_id = ?',
+        whereArgs: [localTxnId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+
+      final payloadJson = rows.first['payload_json'] as String;
+      final payload = Map<String, dynamic>.from(jsonDecode(payloadJson) as Map)
+        ..remove('failed_at')
+        ..remove('failure_reason')
+        ..['queued_at'] = DateTime.now().toIso8601String();
+
+      await txn.insert(pendingTable, {
+        'local_txn_id': localTxnId,
+        'queued_at': payload['queued_at'],
+        'payload_json': jsonEncode(payload),
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+
+      await txn.delete(
+        failedTable,
+        where: 'local_txn_id = ?',
+        whereArgs: [localTxnId],
+      );
+    });
+  }
+
+  Future<void> deleteFailed(String localTxnId) async {
+    await _database.delete(
+      failedTable,
+      where: 'local_txn_id = ?',
+      whereArgs: [localTxnId],
+    );
+  }
+
   Future<void> enqueue(Map<String, dynamic> payload) async {
     final key = payload['local_txn_id']?.toString();
     if (key == null || key.isEmpty) {

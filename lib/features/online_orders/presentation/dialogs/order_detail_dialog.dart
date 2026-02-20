@@ -5,7 +5,17 @@ extension OrderDetailDialogMethods on _ProductListScreenState {
     final orderId = order['id'];
     if (orderId == null) return;
 
-    final items = await _fetchOrderItems(orderId as int);
+    List<_OnlineOrderItem> items;
+    try {
+      items = await _fetchOrderItems(orderId as int);
+    } catch (error) {
+      if (!mounted) return;
+      _showDropdownSnackbar(
+        'Cannot load order details while offline. Reconnect and try again. ($error)',
+        isError: true,
+      );
+      return;
+    }
     if (!mounted) return;
 
     await showDialog<void>(
@@ -105,10 +115,15 @@ extension OrderDetailDialogMethods on _ProductListScreenState {
   }
 
   Future<List<_OnlineOrderItem>> _fetchOrderItems(int orderId) async {
-    final rows = await supabase
-        .from('order_items')
-        .select('quantity, product_id, modifiers, products(*)')
-        .eq('order_id', orderId);
+    dynamic rows;
+    try {
+      rows = await supabase
+          .from('order_items')
+          .select('quantity, product_id, modifiers, products(*)')
+          .eq('order_id', orderId);
+    } catch (error) {
+      throw Exception('Order item lookup failed: $error');
+    }
 
     final List<_OnlineOrderItem> items = [];
     for (final row in rows as List<dynamic>) {

@@ -41,6 +41,44 @@ class ProductCatalogRepository {
     ''');
   }
 
+  Future<String?> _cacheProductImage(Product product) async {
+    final imageUrl = product.imageUrl;
+    if (imageUrl == null || imageUrl.isEmpty) return null;
+
+    try {
+      final uri = Uri.tryParse(imageUrl);
+      if (uri == null || !uri.hasScheme) return imageUrl;
+
+      final basePath = await getDatabasesPath();
+      final imageDir = Directory(p.join(basePath, 'product_images'));
+      if (!await imageDir.exists()) {
+        await imageDir.create(recursive: true);
+      }
+
+      final extension = p.extension(uri.path).isEmpty
+          ? '.img'
+          : p.extension(uri.path);
+      final targetPath = p.join(imageDir.path, '${product.id}$extension');
+      final file = File(targetPath);
+      if (await file.exists()) {
+        return targetPath;
+      }
+
+      final client = HttpClient();
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final bytes = await consolidateHttpClientResponseBytes(response);
+        await file.writeAsBytes(bytes, flush: true);
+        return targetPath;
+      }
+    } catch (_) {
+      // Keep catalog caching even if image download fails.
+    }
+
+    return imageUrl;
+  }
+
   Future<void> saveProducts(List<Product> products) async {
     final db = await _openDb();
     await _ensureTable(db);
@@ -48,9 +86,15 @@ class ProductCatalogRepository {
 
     await db.transaction((txn) async {
       for (final product in products) {
+        final localImage = await _cacheProductImage(product);
+        final payload = product.toJson();
+        if (localImage != null) {
+          payload['image_url'] = localImage;
+        }
+
         await txn.insert(_table, {
           'id': product.id,
-          'payload_json': jsonEncode(product.toJson()),
+          'payload_json': jsonEncode(payload),
           'updated_at': now,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }

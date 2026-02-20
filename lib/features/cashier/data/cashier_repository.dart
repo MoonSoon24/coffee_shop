@@ -5,31 +5,14 @@ class CashierRepository {
     required int? cashierId,
     required int? shiftId,
   }) {
-    return supabase
-        .from('orders')
-        .stream(primaryKey: ['id'])
-        .order('created_at', ascending: false)
-        .map(
-          (rows) => rows
-              .map((row) => Map<String, dynamic>.from(row))
-              .toList(growable: false),
-        );
+    return LocalOrderStoreRepository.instance.watchAllOrders();
   }
 
   Stream<List<Map<String, dynamic>>> activeOrdersStream({
     required int? cashierId,
     required int? shiftId,
   }) {
-    return supabase
-        .from('orders')
-        .stream(primaryKey: ['id'])
-        .order('created_at')
-        .map(
-          (rows) => rows
-              .where((row) => row['status'] == 'active')
-              .map((row) => Map<String, dynamic>.from(row))
-              .toList(growable: false),
-        );
+    return LocalOrderStoreRepository.instance.watchActiveOrders();
   }
 
   Future<List<Map<String, dynamic>>> fetchOtherActiveOrders({
@@ -37,18 +20,13 @@ class CashierRepository {
     required int? cashierId,
     required int? shiftId,
   }) async {
-    final rows = await supabase
-        .from('orders')
-        .select(
-          'id, customer_name, total_price, order_source, type, notes, cashier_id, shift_id',
+    final rows = await LocalOrderStoreRepository.instance.fetchAllOrders();
+    return rows
+        .where(
+          (row) =>
+              row['status'] == 'active' &&
+              ((row['id'] as num?)?.toInt() ?? -1) != (excludedOrderId ?? -1),
         )
-        .eq('status', 'active')
-        .neq('id', excludedOrderId ?? -1)
-        .order('created_at');
-
-    return (rows as List<dynamic>)
-        .whereType<Map>()
-        .map((row) => Map<String, dynamic>.from(row))
         .toList(growable: false);
   }
 }

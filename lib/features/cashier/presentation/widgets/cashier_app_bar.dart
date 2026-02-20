@@ -6,6 +6,8 @@ extension CashierAppBarMethods on _ProductListScreenState {
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlhc29kdG91b2lrYWV1eGt1ZWN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA0ODYxMzIsImV4cCI6MjA4NjA2MjEzMn0.iqm3zxfy-Xl2a_6GDmTj6io8vJW2B3Sr5SHq_4vjJW4';
   static const String _cachedShiftIdKey = 'cached_active_shift_id';
   static const String _cachedCashierIdKey = 'cached_active_cashier_id';
+  static final OfflineShiftRepository _offlineShiftRepository =
+      OfflineShiftRepository();
 
   PreferredSizeWidget _buildCashierAppBar() {
     return AppBar(
@@ -108,6 +110,10 @@ extension CashierAppBarMethods on _ProductListScreenState {
               value: 'sync_offline',
               child: Text('Sync offline orders'),
             ),
+            PopupMenuItem(
+              value: 'failed_offline',
+              child: Text('Failed offline orders'),
+            ),
             PopupMenuItem(value: 'printer', child: Text('Printer settings')),
           ],
           onSelected: (value) async {
@@ -119,6 +125,8 @@ extension CashierAppBarMethods on _ProductListScreenState {
               await _showShiftsDialog();
             } else if (value == 'sync_offline') {
               await _syncOfflineOrders();
+            } else if (value == 'failed_offline') {
+              await _showFailedOfflineOrdersDialog();
             } else if (value == 'printer') {
               showPrinterSettingsDialog(
                 context,
@@ -196,6 +204,8 @@ extension CashierAppBarMethods on _ProductListScreenState {
         _activeCashierId = cashierId;
       });
       await _cacheActiveShiftLocally(shiftId: shiftId, cashierId: cashierId);
+      await _offlineShiftRepository.init();
+      await _offlineShiftRepository.syncPendingShifts(supabase);
 
       if (_activeShiftId == null || _activeCashierId == null) {
         await _showOpenShiftDialog();
@@ -318,13 +328,13 @@ extension CashierAppBarMethods on _ProductListScreenState {
     if (!mounted) return;
     if (!force && _activeShiftId != null && _activeCashierId != null) return;
 
-    final currentUser = supabase.auth.currentUser;
-    if (currentUser == null) {
+    try {
+      supabase.auth.currentUser;
+    } catch (_) {
       _showDropdownSnackbar(
-        'Terminal session not authenticated. Set TERMINAL_EMAIL and TERMINAL_PASSWORD in .env, then restart app.',
+        'Supabase unavailable, switching to offline cashier auth.',
         isError: true,
       );
-      return;
     }
 
     final pinController = TextEditingController();
@@ -332,15 +342,28 @@ extension CashierAppBarMethods on _ProductListScreenState {
     int? selectedCashierId;
     List<Map<String, dynamic>> cashiers = <Map<String, dynamic>>[];
 
+    await _offlineShiftRepository.init();
+
     try {
       final rows = await supabase
           .from('cashier')
           .select('id, name, code')
           .order('name', ascending: true);
       cashiers = _normalizeCashierRows(rows);
-    } catch (e) {
-      _showDropdownSnackbar('Failed to load cashiers: $e', isError: true);
-      return;
+      await _offlineShiftRepository.cacheCashiers(cashiers);
+    } catch (_) {
+      cashiers = await _offlineShiftRepository.getCachedCashiers();
+      if (cashiers.isEmpty) {
+        _showDropdownSnackbar(
+          'Offline and no cached cashiers available.',
+          isError: true,
+        );
+        return;
+      }
+      _showDropdownSnackbar(
+        'Using cached cashier data (offline mode).',
+        isError: true,
+      );
     }
 
     if (!mounted) return;
@@ -375,9 +398,11 @@ extension CashierAppBarMethods on _ProductListScreenState {
                 (row) => _asInt(row['id']) == cashierId,
               );
 
-              final validPin =
+              final onlineValidPin =
                   (selectedCashier['code'] ?? '').toString() == pin;
-              if (!validPin) {
+              final offlineValidPin = await _offlineShiftRepository
+                  .validateCashierPin(cashierId: cashierId, pin: pin);
+              if (!onlineValidPin && !offlineValidPin) {
                 _showDropdownSnackbar('Invalid PIN.', isError: true);
                 return;
               }
@@ -408,9 +433,24 @@ extension CashierAppBarMethods on _ProductListScreenState {
                 );
                 if (dialogContext.mounted) Navigator.of(dialogContext).pop();
                 _showDropdownSnackbar('Shift opened successfully.');
-              } catch (e) {
+              } catch (_) {
+                final localShiftId = await _offlineShiftRepository
+                    .enqueueOfflineShift(
+                      cashierId: cashierId,
+                      branchId: branchId,
+                    );
+                if (!mounted) return;
+                setState(() {
+                  _activeShiftId = int.tryParse(localShiftId);
+                  _activeCashierId = cashierId;
+                });
+                await _cacheActiveShiftLocally(
+                  shiftId: _activeShiftId,
+                  cashierId: _activeCashierId,
+                );
+                if (dialogContext.mounted) Navigator.of(dialogContext).pop();
                 _showDropdownSnackbar(
-                  'Failed to open shift: $e',
+                  'Shift opened offline and queued for sync.',
                   isError: true,
                 );
               }
@@ -777,5 +817,97 @@ extension CashierAppBarMethods on _ProductListScreenState {
       }
       controller.dispose();
     });
+  }
+
+  Future<void> _showFailedOfflineOrdersDialog() async {
+    final cart = context.read<CartProvider>();
+    final failed = await cart.getFailedOfflineOrders();
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Failed Offline Orders'),
+              content: SizedBox(
+                width: 620,
+                child: failed.isEmpty
+                    ? const Text('No failed offline orders.')
+                    : ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: failed.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final item = failed[index];
+                          final localTxnId =
+                              item['local_txn_id']?.toString() ?? '-';
+                          final failedAt = item['failed_at']?.toString() ?? '-';
+                          final reason =
+                              item['failure_reason']?.toString() ?? '-';
+                          final order = Map<String, dynamic>.from(
+                            item['order'] as Map? ?? <String, dynamic>{},
+                          );
+                          final total = order['total_price']?.toString() ?? '0';
+
+                          return ListTile(
+                            title: Text('Txn $localTxnId • Total $total'),
+                            subtitle: Text(
+                              'Failed: $failedAt\nReason: $reason',
+                            ),
+                            isThreeLine: true,
+                            trailing: Wrap(
+                              spacing: 8,
+                              children: [
+                                TextButton(
+                                  onPressed: () async {
+                                    await cart.retryFailedOfflineOrder(
+                                      localTxnId,
+                                    );
+                                    final refreshed = await cart
+                                        .getFailedOfflineOrders();
+                                    if (!context.mounted) return;
+                                    setDialogState(() {
+                                      failed
+                                        ..clear()
+                                        ..addAll(refreshed);
+                                    });
+                                  },
+                                  child: const Text('Retry Sync'),
+                                ),
+                                TextButton(
+                                  onPressed: () async {
+                                    await cart.deleteFailedOfflineOrder(
+                                      localTxnId,
+                                    );
+                                    final refreshed = await cart
+                                        .getFailedOfflineOrders();
+                                    if (!context.mounted) return;
+                                    setDialogState(() {
+                                      failed
+                                        ..clear()
+                                        ..addAll(refreshed);
+                                    });
+                                  },
+                                  child: const Text('Discard'),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 }

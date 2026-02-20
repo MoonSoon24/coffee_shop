@@ -838,7 +838,17 @@ extension CashierControllerMethods on _ProductListScreenState {
     }
 
     final cart = context.read<CartProvider>();
-    final items = await _fetchOrderItems(orderId as int);
+    List<_OnlineOrderItem> items;
+    try {
+      items = await _fetchOrderItems(orderId as int);
+    } catch (error) {
+      if (!mounted) return;
+      _showDropdownSnackbar(
+        'Cannot load order items while offline. Reconnect and try again. ($error)',
+        isError: true,
+      );
+      return;
+    }
     if (!mounted) return;
 
     cart.clearCart();
