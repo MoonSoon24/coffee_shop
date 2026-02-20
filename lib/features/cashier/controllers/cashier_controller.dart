@@ -6,33 +6,42 @@ extension CashierControllerMethods on _ProductListScreenState {
       return const <Map<String, dynamic>>[];
     }
 
-    final rows = await supabase
-        .from('orders')
-        .select(
-          'id, customer_name, total_price, order_source, type, notes, cashier_id, shift_id',
-        )
-        .eq('status', 'active')
-        .neq('id', _currentActiveOrderId ?? -1)
-        .order('created_at');
+    try {
+      final rows = await supabase
+          .from('orders')
+          .select(
+            'id, customer_name, total_price, order_source, type, notes, cashier_id, shift_id',
+          )
+          .eq('status', 'active')
+          .neq('id', _currentActiveOrderId ?? -1)
+          .order('created_at');
 
-    return (rows as List<dynamic>)
-        .whereType<Map<String, dynamic>>()
-        .where((row) {
-          final rowCashierId = (row['cashier_id'] as num?)?.toInt();
-          final rowShiftId = (row['shift_id'] as num?)?.toInt();
-          final matchesShift = _activeShiftId == null
-              ? true
-              : rowShiftId == _activeShiftId;
-          final fallbackLegacyCashierMatch =
-              _activeShiftId != null &&
-              rowShiftId == null &&
-              rowCashierId == _activeCashierId;
-          final matchesCashier = _activeShiftId == null
-              ? rowCashierId == _activeCashierId
-              : true;
-          return (matchesShift && matchesCashier) || fallbackLegacyCashierMatch;
-        })
-        .toList(growable: false);
+      return (rows as List<dynamic>)
+          .whereType<Map<String, dynamic>>()
+          .where((row) {
+            final rowCashierId = (row['cashier_id'] as num?)?.toInt();
+            final rowShiftId = (row['shift_id'] as num?)?.toInt();
+            final matchesShift = _activeShiftId == null
+                ? true
+                : rowShiftId == _activeShiftId;
+            final fallbackLegacyCashierMatch =
+                _activeShiftId != null &&
+                rowShiftId == null &&
+                rowCashierId == _activeCashierId;
+            final matchesCashier = _activeShiftId == null
+                ? rowCashierId == _activeCashierId
+                : true;
+            return (matchesShift && matchesCashier) ||
+                fallbackLegacyCashierMatch;
+          })
+          .toList(growable: false);
+    } catch (_) {
+      return _cashierRepository.fetchOtherActiveOrders(
+        excludedOrderId: _currentActiveOrderId,
+        cashierId: _activeCashierId,
+        shiftId: _activeShiftId,
+      );
+    }
   }
 
   Future<List<Map<String, dynamic>>> _fetchOrderItemRows(int orderId) async {
@@ -42,6 +51,99 @@ extension CashierControllerMethods on _ProductListScreenState {
         .eq('order_id', orderId);
 
     return (rows as List<dynamic>).whereType<Map<String, dynamic>>().toList();
+  }
+
+  bool get _isOfflineMode {
+    final cart = context.read<CartProvider>();
+    return !cart.hasNetworkConnection || !cart.isServerReachable;
+  }
+
+  Map<String, dynamic> _cartItemToLocalRow(CartItem item, int orderId) {
+    return {
+      'order_id': orderId,
+      'quantity': item.quantity,
+      'product_id': item.id,
+      'modifiers': item.modifiersData ?? item.modifiers?.toJson(),
+      'products': {
+        'id': item.id,
+        'name': item.name,
+        'price': item.price,
+        'category': item.category,
+        'description': item.description,
+        'image_url': item.imageUrl,
+        'is_available': item.isAvailable,
+        'is_bundle': item.isBundle,
+        'is_recommended': item.isRecommended,
+        'modifiers': item.productModifiers,
+      },
+    };
+  }
+
+  double _localModifierExtra(dynamic modifiersRaw) {
+    if (modifiersRaw is! List) return 0;
+    return modifiersRaw.whereType<Map<String, dynamic>>().fold<double>(0, (
+      sum,
+      modifier,
+    ) {
+      final selected =
+          modifier['selected_options'] as List<dynamic>? ?? <dynamic>[];
+      return sum +
+          selected.whereType<Map<String, dynamic>>().fold<double>(
+            0,
+            (s, option) => s + ((option['price'] as num?)?.toDouble() ?? 0),
+          );
+    });
+  }
+
+  double _localRowSubtotal(Map<String, dynamic> row) {
+    final qty = (row['quantity'] as num?)?.toDouble() ?? 0;
+    final product = row['products'] as Map<String, dynamic>?;
+    final base = (product?['price'] as num?)?.toDouble() ?? 0;
+    final extra = _localModifierExtra(row['modifiers']);
+    return (base + extra) * qty;
+  }
+
+  Future<void> _upsertLocalOrderTotal(
+    int orderId, {
+    required String status,
+    String? notes,
+  }) async {
+    final orders = await LocalOrderStoreRepository.instance.fetchAllOrders();
+    final existing = orders.firstWhere(
+      (order) => ((order['id'] as num?)?.toInt() ?? -1) == orderId,
+      orElse: () => <String, dynamic>{'id': orderId},
+    );
+    final rows = await LocalOrderItemStoreRepository.instance.fetchByOrderId(
+      orderId,
+    );
+    final total = rows.fold<double>(
+      0,
+      (sum, row) => sum + _localRowSubtotal(row),
+    );
+    await LocalOrderStoreRepository.instance.upsertOrder({
+      ...Map<String, dynamic>.from(existing),
+      'id': orderId,
+      'status': status,
+      'total_price': total,
+      'subtotal': total,
+      'discount_total': 0,
+      'notes': notes ?? existing['notes'],
+      'created_at': existing['created_at'] ?? DateTime.now().toIso8601String(),
+      'order_source': existing['order_source'] ?? 'cashier',
+    });
+  }
+
+  void _restoreCartItemsFromMap(Map<String, CartItem> entries) {
+    final cart = context.read<CartProvider>();
+    cart.clearCart();
+    for (final item in entries.values) {
+      cart.addItem(
+        item,
+        quantity: item.quantity,
+        modifiers: item.modifiers,
+        modifiersData: item.modifiersData,
+      );
+    }
   }
 
   String _modifierSignature(dynamic rawModifiers) {

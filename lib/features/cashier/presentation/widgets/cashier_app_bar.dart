@@ -9,9 +9,52 @@ extension CashierAppBarMethods on _ProductListScreenState {
   static final OfflineShiftRepository _offlineShiftRepository =
       OfflineShiftRepository();
 
+  Widget _buildConnectionBadge(CartProvider cart) {
+    final networkOk = cart.hasNetworkConnection;
+    final serverOk = cart.isServerReachable;
+
+    late final Color color;
+    late final IconData icon;
+    late final String text;
+
+    if (!networkOk) {
+      color = Colors.red.shade700;
+      icon = Icons.cloud_off;
+      text = 'Offline';
+    } else if (!serverOk) {
+      color = Colors.orange.shade700;
+      icon = Icons.warning;
+      text = 'Server unreachable';
+    } else {
+      color = Colors.green.shade700;
+      icon = Icons.cloud_done;
+      text = 'Online';
+    }
+
+    return Chip(
+      visualDensity: VisualDensity.compact,
+      backgroundColor: color.withOpacity(0.12),
+      avatar: Icon(icon, size: 16, color: color),
+      label: Text(
+        text,
+        style: TextStyle(color: color, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+
   PreferredSizeWidget _buildCashierAppBar() {
     return AppBar(
-      title: const Text('Cashier Dashboard'),
+      title: Consumer<CartProvider>(
+        builder: (context, cart, _) {
+          return Row(
+            children: [
+              const Text('Cashier Dashboard'),
+              const SizedBox(width: 8),
+              _buildConnectionBadge(cart),
+            ],
+          );
+        },
+      ),
       backgroundColor: Colors.white,
       surfaceTintColor: Colors.white,
       actions: [
@@ -106,14 +149,8 @@ extension CashierAppBarMethods on _ProductListScreenState {
             PopupMenuItem(value: 'cashier', child: Text('Cashier Page')),
             PopupMenuItem(value: 'showorders', child: Text('Show Orders')),
             PopupMenuItem(value: 'shifts', child: Text('Shifts')),
-            PopupMenuItem(
-              value: 'sync_offline',
-              child: Text('Sync offline orders'),
-            ),
-            PopupMenuItem(
-              value: 'failed_offline',
-              child: Text('Failed offline orders'),
-            ),
+            PopupMenuItem(value: 'sync_status', child: Text('Sync status')),
+            PopupMenuItem(value: 'refresh_app', child: Text('Refresh')),
             PopupMenuItem(value: 'printer', child: Text('Printer settings')),
           ],
           onSelected: (value) async {
@@ -123,10 +160,10 @@ extension CashierAppBarMethods on _ProductListScreenState {
               _showAllOrdersDialog();
             } else if (value == 'shifts') {
               await _showShiftsDialog();
-            } else if (value == 'sync_offline') {
-              await _syncOfflineOrders();
-            } else if (value == 'failed_offline') {
-              await _showFailedOfflineOrdersDialog();
+            } else if (value == 'sync_status') {
+              await _showSyncStatusScreen();
+            } else if (value == 'refresh_app') {
+              await _refreshAppData();
             } else if (value == 'printer') {
               showPrinterSettingsDialog(
                 context,
@@ -170,21 +207,6 @@ extension CashierAppBarMethods on _ProductListScreenState {
     );
   }
 
-  Future<void> _syncOfflineOrders() async {
-    final cart = context.read<CartProvider>();
-    try {
-      final synced = await cart.syncOfflineOrders();
-      if (!mounted) return;
-      if (synced == 0) {
-        _showDropdownSnackbar('No offline orders to sync.');
-      } else {
-        _showDropdownSnackbar('Synced $synced offline order(s).');
-      }
-    } catch (e) {
-      _showDropdownSnackbar('Failed syncing offline orders: $e', isError: true);
-    }
-  }
-
   Future<void> _syncShiftContext() async {
     try {
       final openShift = await supabase
@@ -205,7 +227,6 @@ extension CashierAppBarMethods on _ProductListScreenState {
       });
       await _cacheActiveShiftLocally(shiftId: shiftId, cashierId: cashierId);
       await _offlineShiftRepository.init();
-      await _offlineShiftRepository.syncPendingShifts(supabase);
 
       if (_activeShiftId == null || _activeCashierId == null) {
         await _showOpenShiftDialog();
@@ -447,6 +468,19 @@ extension CashierAppBarMethods on _ProductListScreenState {
                 await _cacheActiveShiftLocally(
                   shiftId: _activeShiftId,
                   cashierId: _activeCashierId,
+                );
+                await context.read<CartProvider>().enqueueOfflineShiftEvent(
+                  eventType: 'shift_open',
+                  label: 'shift_open #${_activeShiftId ?? '-'}',
+                  payload: {
+                    'shift': {
+                      'local_shift_id': _activeShiftId,
+                      'cashier_id': cashierId,
+                      'branch_id': branchId,
+                      'started_at': DateTime.now().toIso8601String(),
+                      'opened_by': supabase.auth.currentUser?.id,
+                    },
+                  },
                 );
                 if (dialogContext.mounted) Navigator.of(dialogContext).pop();
                 _showDropdownSnackbar(
@@ -698,6 +732,15 @@ extension CashierAppBarMethods on _ProductListScreenState {
   }
 
   Future<void> _closeShift(int shiftId) async {
+    final cart = context.read<CartProvider>();
+    if (cart.pendingOfflineOrderCount > 0) {
+      final shouldContinue = await _showUnsyncedWarningDialog(
+        pendingCount: cart.pendingOfflineOrderCount,
+      );
+      if (!shouldContinue) {
+        return;
+      }
+    }
     try {
       await supabase
           .from('shifts')
@@ -717,8 +760,63 @@ extension CashierAppBarMethods on _ProductListScreenState {
       _showDropdownSnackbar('Shift closed.');
       await _showOpenShiftDialog();
     } catch (e) {
-      _showDropdownSnackbar('Failed to close shift: $e', isError: true);
+      await context.read<CartProvider>().enqueueOfflineShiftEvent(
+        eventType: 'shift_close',
+        label: 'shift_close #$shiftId',
+        payload: {
+          'shift': {
+            'shift_id': shiftId,
+            'cashier_id': _activeCashierId,
+            'ended_at': DateTime.now().toIso8601String(),
+            'closed_by': supabase.auth.currentUser?.id,
+          },
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _activeShiftId = null;
+        _activeCashierId = null;
+      });
+      await _cacheActiveShiftLocally(shiftId: null, cashierId: null);
+      _showDropdownSnackbar(
+        'Shift close queued for sync (offline mode).',
+        isError: true,
+      );
+      await _showOpenShiftDialog();
     }
+  }
+
+  Future<bool> _showUnsyncedWarningDialog({required int pendingCount}) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Unsynced data warning'),
+          content: Text(
+            'You still have $pendingCount unsynced item(s). Please wait for internet to restore and sync first. Closing shift now may risk data loss.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Close anyway'),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false;
+  }
+
+  Future<void> _showSyncStatusScreen() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (context) => const _SyncStatusScreen()),
+    );
   }
 
   void _showDropdownSnackbar(String message, {bool isError = false}) {
@@ -818,96 +916,370 @@ extension CashierAppBarMethods on _ProductListScreenState {
       controller.dispose();
     });
   }
+}
 
-  Future<void> _showFailedOfflineOrdersDialog() async {
+class _SyncStatusScreen extends StatefulWidget {
+  const _SyncStatusScreen();
+
+  @override
+  State<_SyncStatusScreen> createState() => _SyncStatusScreenState();
+}
+
+class _SyncStatusScreenState extends State<_SyncStatusScreen> {
+  bool _loading = true;
+  Map<String, dynamic> _summary = <String, dynamic>{};
+  List<Map<String, dynamic>> _queue = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _logs = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _failed = <Map<String, dynamic>>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
     final cart = context.read<CartProvider>();
-    final failed = await cart.getFailedOfflineOrders();
+    await cart.refreshConnectionStatus();
+
+    final result = await Future.wait([
+      cart.getSyncSummary(),
+      cart.getPendingSyncQueue(),
+      cart.getSyncLogs(),
+      cart.getFailedOfflineOrders(),
+    ]);
 
     if (!mounted) return;
+    setState(() {
+      _summary = Map<String, dynamic>.from(result[0] as Map);
+      _queue = (result[1] as List).whereType<Map<String, dynamic>>().toList(
+        growable: false,
+      );
+      _logs = (result[2] as List).whereType<Map<String, dynamic>>().toList(
+        growable: false,
+      );
+      _failed = (result[3] as List).whereType<Map<String, dynamic>>().toList(
+        growable: false,
+      );
+      _loading = false;
+    });
+  }
+
+  String _formatTimelineTime(String? iso) {
+    if (iso == null || iso.isEmpty) return '-';
+    final dt = DateTime.tryParse(iso)?.toLocal();
+    if (dt == null) return iso;
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final ss = dt.second.toString().padLeft(2, '0');
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} $hh:$mm:$ss';
+  }
+
+  Future<void> _showLogPayload(Map<String, dynamic> log) async {
+    final payload = Map<String, dynamic>.from(
+      log['payload'] as Map? ?? <String, dynamic>{},
+    );
+
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Failed Offline Orders'),
-              content: SizedBox(
-                width: 620,
-                child: failed.isEmpty
-                    ? const Text('No failed offline orders.')
-                    : ListView.separated(
-                        shrinkWrap: true,
-                        itemCount: failed.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (context, index) {
-                          final item = failed[index];
-                          final localTxnId =
-                              item['local_txn_id']?.toString() ?? '-';
-                          final failedAt = item['failed_at']?.toString() ?? '-';
-                          final reason =
-                              item['failure_reason']?.toString() ?? '-';
-                          final order = Map<String, dynamic>.from(
-                            item['order'] as Map? ?? <String, dynamic>{},
-                          );
-                          final total = order['total_price']?.toString() ?? '0';
-
-                          return ListTile(
-                            title: Text('Txn $localTxnId • Total $total'),
-                            subtitle: Text(
-                              'Failed: $failedAt\nReason: $reason',
-                            ),
-                            isThreeLine: true,
-                            trailing: Wrap(
-                              spacing: 8,
-                              children: [
-                                TextButton(
-                                  onPressed: () async {
-                                    await cart.retryFailedOfflineOrder(
-                                      localTxnId,
-                                    );
-                                    final refreshed = await cart
-                                        .getFailedOfflineOrders();
-                                    if (!context.mounted) return;
-                                    setDialogState(() {
-                                      failed
-                                        ..clear()
-                                        ..addAll(refreshed);
-                                    });
-                                  },
-                                  child: const Text('Retry Sync'),
-                                ),
-                                TextButton(
-                                  onPressed: () async {
-                                    await cart.deleteFailedOfflineOrder(
-                                      localTxnId,
-                                    );
-                                    final refreshed = await cart
-                                        .getFailedOfflineOrders();
-                                    if (!context.mounted) return;
-                                    setDialogState(() {
-                                      failed
-                                        ..clear()
-                                        ..addAll(refreshed);
-                                    });
-                                  },
-                                  child: const Text('Discard'),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Close'),
-                ),
-              ],
-            );
-          },
+        return AlertDialog(
+          title: const Text('Sync Log Payload'),
+          content: SizedBox(
+            width: 760,
+            child: payload.isEmpty
+                ? const Text('No payload captured for this log entry.')
+                : SingleChildScrollView(
+                    child: SelectableText(
+                      const JsonEncoder.withIndent('  ').convert(payload),
+                      style: const TextStyle(fontFamily: 'monospace'),
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Close'),
+            ),
+          ],
         );
       },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cart = context.watch<CartProvider>();
+    final pendingOrders = (_summary['pending_orders'] as num?)?.toInt() ?? 0;
+    final pendingShiftEvents =
+        (_summary['pending_shift_events'] as num?)?.toInt() ?? 0;
+    final pendingTotal = (_summary['pending_total'] as num?)?.toInt() ?? 0;
+    final pendingValue = (_summary['pending_value'] as num?)?.toDouble() ?? 0;
+    final failedTotal = (_summary['failed_total'] as num?)?.toInt() ?? 0;
+    final lastSync = _summary['last_successful_sync_at'] as DateTime?;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Sync Status')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _reload,
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            cart.hasNetworkConnection
+                                ? (cart.isServerReachable
+                                      ? '🟢 Online'
+                                      : '🟡 Server unreachable')
+                                : '🔴 Offline',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            cart.hasNetworkConnection
+                                ? (cart.isServerReachable
+                                      ? 'Network connected and backend reachable.'
+                                      : 'Device has internet, but backend is unreachable.')
+                                : 'No network connectivity detected.',
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Last successful sync: ${lastSync == null ? 'Never' : lastSync.toLocal().toString()}',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Summary',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text('Pending items: $pendingTotal'),
+                          Text('Pending orders: $pendingOrders'),
+                          Text('Pending shift events: $pendingShiftEvents'),
+                          Text(
+                            'Pending sync value: ${CurrencyFormatters.formatRupiah(pendingValue)}',
+                          ),
+                          Text('Failed items: $failedTotal'),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () async {
+                            await context
+                                .read<CartProvider>()
+                                .syncOfflineOrders();
+                            await _reload();
+                          },
+                          icon: const Icon(Icons.sync),
+                          label: const Text('Force Sync / Sync Now'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          await context.read<CartProvider>().clearSyncLogs();
+                          await _reload();
+                        },
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Clear logs'),
+                      ),
+                    ],
+                  ),
+                  if (cart.isSyncingOfflineOrders) ...[
+                    const SizedBox(height: 12),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Syncing ${cart.syncProcessedItems} of ${cart.syncTotalItems} items...',
+                            ),
+                            const SizedBox(height: 8),
+                            LinearProgressIndicator(
+                              value: cart.syncTotalItems == 0
+                                  ? null
+                                  : cart.syncProcessedItems /
+                                        cart.syncTotalItems,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Failed Items',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_failed.isEmpty)
+                    const Text('No failed items.')
+                  else
+                    ..._failed.map((item) {
+                      final localTxnId =
+                          item['local_txn_id']?.toString() ?? '-';
+                      final rawReason =
+                          item['failure_reason']?.toString() ?? '-';
+                      final friendlyReason = context
+                          .read<CartProvider>()
+                          .toFriendlySyncError(rawReason);
+                      return Card(
+                        child: ListTile(
+                          title: Text('Failed item $localTxnId'),
+                          subtitle: Text(friendlyReason),
+                          trailing: Wrap(
+                            spacing: 8,
+                            children: [
+                              TextButton(
+                                onPressed: () async {
+                                  await context
+                                      .read<CartProvider>()
+                                      .retryFailedOfflineOrder(localTxnId);
+                                  await _reload();
+                                },
+                                child: const Text('Retry'),
+                              ),
+                              TextButton(
+                                onPressed: () async {
+                                  final ok = await showDialog<bool>(
+                                    context: context,
+                                    builder: (dialogContext) => AlertDialog(
+                                      title: const Text('Discard failed item'),
+                                      content: const Text(
+                                        'Admin action: discard this blocked local record so other data can sync.',
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(
+                                            dialogContext,
+                                          ).pop(false),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        ElevatedButton(
+                                          onPressed: () => Navigator.of(
+                                            dialogContext,
+                                          ).pop(true),
+                                          child: const Text('Discard (Admin)'),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                  if (ok != true) return;
+                                  await context
+                                      .read<CartProvider>()
+                                      .deleteFailedOfflineOrder(localTxnId);
+                                  await _reload();
+                                },
+                                child: const Text('Discard (Admin)'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Pending Queue (${_queue.length})',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_queue.isEmpty)
+                    const Text('No pending sync items.')
+                  else
+                    ..._queue.map(
+                      (item) => Card(
+                        child: ListTile(
+                          title: Text(
+                            '${item['event_type'] ?? '-'} • ${item['local_txn_id'] ?? '-'}',
+                          ),
+                          subtitle: Text(
+                            'Occurred: ${item['occurred_at_epoch'] ?? '-'}',
+                          ),
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Sync Logs (${_logs.length})',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_logs.isEmpty)
+                    const Text('No sync logs yet.')
+                  else
+                    ..._logs.map((log) {
+                      final level = (log['level'] ?? '-').toString();
+                      final createdAt = _formatTimelineTime(
+                        log['created_at']?.toString(),
+                      );
+                      final color = level == 'error'
+                          ? Colors.red
+                          : level == 'warning'
+                          ? Colors.orange
+                          : level == 'success'
+                          ? Colors.green
+                          : Colors.blue;
+                      return Card(
+                        child: InkWell(
+                          onTap: () => _showLogPayload(log),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(width: 4, height: 72, color: color),
+                              Expanded(
+                                child: ListTile(
+                                  dense: true,
+                                  title: Text(
+                                    '[${log['level'] ?? '-'}] ${log['message'] ?? '-'}',
+                                  ),
+                                  subtitle: Text(
+                                    '$createdAt • ${log['local_txn_id'] ?? '-'}\nTap to view payload',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                ],
+              ),
+            ),
     );
   }
 }

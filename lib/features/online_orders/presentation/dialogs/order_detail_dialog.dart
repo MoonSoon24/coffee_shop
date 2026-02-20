@@ -7,7 +7,7 @@ extension OrderDetailDialogMethods on _ProductListScreenState {
 
     List<_OnlineOrderItem> items;
     try {
-      items = await _fetchOrderItems(orderId as int);
+      items = await _fetchOrderItems(orderId as int, orderSnapshot: order);
     } catch (error) {
       if (!mounted) return;
       _showDropdownSnackbar(
@@ -114,15 +114,73 @@ extension OrderDetailDialogMethods on _ProductListScreenState {
     );
   }
 
-  Future<List<_OnlineOrderItem>> _fetchOrderItems(int orderId) async {
+  Future<List<Map<String, dynamic>>> _extractRowsFromOrderSnapshot(
+    Map<String, dynamic>? orderSnapshot,
+    int orderId,
+  ) async {
+    final payloadItems =
+        (orderSnapshot?['items'] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList(growable: false);
+    if (payloadItems.isEmpty) {
+      return const <Map<String, dynamic>>[];
+    }
+
+    final cachedProducts = await _productCatalogRepository.loadCachedProducts();
+    final productById = {
+      for (final product in cachedProducts) product.id: product,
+    };
+
+    return payloadItems
+        .map((row) {
+          final productId = (row['product_id'] as num?)?.toInt();
+          final product = productId == null ? null : productById[productId];
+          return <String, dynamic>{
+            'order_id': (row['order_id'] as num?)?.toInt() ?? orderId,
+            'quantity': (row['quantity'] as num?)?.toInt() ?? 1,
+            'product_id': productId,
+            'modifiers': row['modifiers'],
+            'products': product?.toJson(),
+          };
+        })
+        .where((row) => row['products'] != null)
+        .toList(growable: false);
+  }
+
+  Future<List<_OnlineOrderItem>> _fetchOrderItems(
+    int orderId, {
+    Map<String, dynamic>? orderSnapshot,
+  }) async {
     dynamic rows;
     try {
       rows = await supabase
           .from('order_items')
           .select('quantity, product_id, modifiers, products(*)')
           .eq('order_id', orderId);
-    } catch (error) {
-      throw Exception('Order item lookup failed: $error');
+      final cacheRows = (rows as List<dynamic>)
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(growable: false);
+      await LocalOrderItemStoreRepository.instance.replaceForOrder(
+        orderId: orderId,
+        rows: cacheRows,
+      );
+      rows = cacheRows;
+    } catch (_) {
+      rows = await LocalOrderItemStoreRepository.instance.fetchByOrderId(
+        orderId,
+      );
+      if ((rows as List).isEmpty) {
+        final snapshotRows = await _extractRowsFromOrderSnapshot(
+          orderSnapshot,
+          orderId,
+        );
+        if (snapshotRows.isEmpty) {
+          throw Exception('Order item lookup failed while offline.');
+        }
+        rows = snapshotRows;
+      }
     }
 
     final List<_OnlineOrderItem> items = [];

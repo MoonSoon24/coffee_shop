@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
@@ -6,6 +7,7 @@ import 'package:coffee_shop/core/constants/order_status.dart';
 import 'package:coffee_shop/core/services/supabase_client.dart';
 import 'package:coffee_shop/core/services/order_sync_service.dart';
 import 'package:coffee_shop/core/services/local_order_store_repository.dart';
+import 'package:coffee_shop/core/services/local_order_item_store_repository.dart';
 import 'package:coffee_shop/core/utils/formatters.dart';
 import 'package:coffee_shop/features/cashier/models/models.dart';
 import 'package:coffee_shop/features/cashier/providers/cart_provider.dart';
@@ -63,6 +65,19 @@ class _ProductListScreenState extends State<ProductListScreen> {
       ProductCatalogRepository();
   final OnlineOrdersRepository _onlineOrdersRepository =
       OnlineOrdersRepository();
+  static final OfflineShiftRepository _offlineShiftRepositoryCacheLoader =
+      OfflineShiftRepository();
+  CartProvider? _cartProviderSubscription;
+  bool _lastKnownOnlineReachable = false;
+  bool _isRefreshingAppData = false;
+  bool _isCartExpanded = false;
+  final List<_SplitBoardItem> _unassignedSplitItems = <_SplitBoardItem>[];
+  final List<_SplitGroup> _splitGroups = <_SplitGroup>[];
+  String? _selectedSplitItemId;
+  String? _popoverSplitItemId;
+  int _splitQuantityDraft = 1;
+  int _splitGroupCounter = 0;
+  int _splitItemCounter = 0;
 
   Stream<List<Map<String, dynamic>>> get _onlinePendingOrdersStream =>
       _activeShiftId == null
@@ -86,13 +101,39 @@ class _ProductListScreenState extends State<ProductListScreen> {
     _future = _loadProducts();
     LocalOrderStoreRepository.instance.init();
     OrderSyncService.instance.start();
+    unawaited(_primeOfflineCachesOnFirstOpen());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _syncShiftContext();
     });
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final provider = context.read<CartProvider>();
+    if (!identical(_cartProviderSubscription, provider)) {
+      _cartProviderSubscription?.removeListener(_handleConnectionStateChange);
+      _cartProviderSubscription = provider;
+      _lastKnownOnlineReachable =
+          provider.hasNetworkConnection && provider.isServerReachable;
+      provider.addListener(_handleConnectionStateChange);
+    }
+  }
+
+  void _handleConnectionStateChange() {
+    final provider = _cartProviderSubscription;
+    if (provider == null) return;
+    final isOnlineReachable =
+        provider.hasNetworkConnection && provider.isServerReachable;
+    if (isOnlineReachable && !_lastKnownOnlineReachable) {
+      unawaited(_refreshAppData(silent: true));
+    }
+    _lastKnownOnlineReachable = isOnlineReachable;
+  }
+
+  @override
   void dispose() {
+    _cartProviderSubscription?.removeListener(_handleConnectionStateChange);
     _snackbarAnimationController?.dispose();
     _snackbarOverlayEntry?.remove();
     super.dispose();
@@ -113,575 +154,1063 @@ class _ProductListScreenState extends State<ProductListScreen> {
     }
   }
 
+  Future<void> _primeOfflineCachesOnFirstOpen() async {
+    try {
+      final productsData = await supabase.from('products').select();
+      final products = (productsData as List<dynamic>)
+          .whereType<Map>()
+          .map((item) => Product.fromJson(Map<String, dynamic>.from(item)))
+          .toList(growable: false);
+      await _productCatalogRepository.saveProducts(products);
+    } catch (_) {
+      // Keep running in offline-first mode.
+    }
+
+    try {
+      final ordersData = await supabase
+          .from('orders')
+          .select()
+          .order('created_at', ascending: false);
+      final orders = (ordersData as List<dynamic>)
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList(growable: false);
+      await LocalOrderStoreRepository.instance.upsertOrders(orders);
+    } catch (_) {
+      // Keep running in offline-first mode.
+    }
+
+    try {
+      final orderItemsData = await supabase
+          .from('order_items')
+          .select('order_id, quantity, product_id, modifiers, products(*)');
+      final rows = (orderItemsData as List<dynamic>)
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList(growable: false);
+      await LocalOrderItemStoreRepository.instance.replaceAll(rows);
+    } catch (_) {
+      // Keep running in offline-first mode.
+    }
+
+    try {
+      final cashiersData = await supabase
+          .from('cashier')
+          .select('id, name, code')
+          .order('name', ascending: true);
+      final cashiers = (cashiersData as List<dynamic>)
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList(growable: false);
+      await _offlineShiftRepositoryCacheLoader.init();
+      await _offlineShiftRepositoryCacheLoader.cacheCashiers(cashiers);
+    } catch (_) {
+      // Keep running in offline-first mode.
+    }
+  }
+
+  Future<void> _refreshAppData({bool silent = false}) async {
+    if (_isRefreshingAppData) return;
+    _isRefreshingAppData = true;
+    try {
+      await _loadProducts();
+      await _primeOfflineCachesOnFirstOpen();
+      await _syncShiftContext();
+      if (!mounted) return;
+      setState(() {
+        _future = _loadProducts();
+      });
+      if (!silent) {
+        _showDropdownSnackbar('App data refreshed.');
+      }
+    } catch (error) {
+      if (!mounted || silent) return;
+      _showDropdownSnackbar(
+        'Failed to refresh app data: $error',
+        isError: true,
+      );
+    } finally {
+      _isRefreshingAppData = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: _buildCashierAppBar(),
-      body: Row(
-        children: [
-          Expanded(
-            flex: 4,
-            child: Column(
+      body: _isCartExpanded
+          ? _buildSplitBoardBody()
+          : Row(
               children: [
-                _buildColumnHeader(
-                  title: 'Menu List',
-                  trailing: PopupMenuButton<String>(
-                    tooltip: 'Menu settings',
-                    icon: const Icon(Icons.more_vert),
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
-                        value: 'refresh',
-                        child: Text('Refresh menu'),
-                      ),
-                      PopupMenuItem(
-                        value: 'view_settings',
-                        child: Text('View settings'),
-                      ),
-                    ],
-                    onSelected: (value) async {
-                      if (value == 'refresh') {
-                        setState(() => _future = _loadProducts());
-                      } else if (value == 'view_settings') {
-                        await _showMenuViewSettingsDialog();
-                      }
-                    },
-                  ),
-                ),
                 Expanded(
-                  child: Container(
-                    color: Colors.grey[100],
-                    child: FutureBuilder<List<Product>>(
-                      future: _future,
-                      builder: (context, snapshot) {
-                        if (snapshot.connectionState ==
-                            ConnectionState.waiting) {
-                          return const Center(
-                            child: CircularProgressIndicator(),
-                          );
-                        }
-                        if (snapshot.hasError) {
-                          final errorText = snapshot.error.toString();
-                          final isPolicyError =
-                              errorText.contains('row-level security') ||
-                              errorText.contains('permission denied') ||
-                              errorText.contains('not authorized') ||
-                              errorText.contains('42501');
-
-                          return Center(
-                            child: Padding(
-                              padding: const EdgeInsets.all(24),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(
-                                    Icons.lock_outline,
-                                    size: 40,
-                                    color: Colors.orange,
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Text(
-                                    isPolicyError
-                                        ? 'Data cannot be read because Supabase Row Level Security policy blocks this client.'
-                                        : 'Error loading menu data.',
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    isPolicyError
-                                        ? 'Fix by updating Supabase RLS SELECT policies so this app client is allowed to read products/orders.'
-                                        : errorText,
-                                    textAlign: TextAlign.center,
-                                  ),
-                                ],
-                              ),
+                  flex: 4,
+                  child: Column(
+                    children: [
+                      _buildColumnHeader(
+                        title: 'Menu List',
+                        trailing: PopupMenuButton<String>(
+                          tooltip: 'Menu settings',
+                          icon: const Icon(Icons.more_vert),
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                              value: 'refresh',
+                              child: Text('Refresh menu'),
                             ),
-                          );
-                        }
-                        if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                          return const Center(
-                            child: Text('No products found!'),
-                          );
-                        }
-
-                        final products = snapshot.data!;
-                        final visibleProducts = products
-                            .where(
-                              (product) => !_hiddenMenuCategories.contains(
-                                product.category,
-                              ),
-                            )
-                            .toList(growable: false);
-                        final categories =
-                            visibleProducts
-                                .map((product) => product.category)
-                                .toSet()
-                                .toList()
-                              ..sort();
-                        final effectiveSelectedCategory =
-                            categories.contains(_selectedCategory)
-                            ? _selectedCategory
-                            : null;
-                        final filteredProducts =
-                            effectiveSelectedCategory == null
-                            ? visibleProducts
-                            : visibleProducts
-                                  .where(
-                                    (product) =>
-                                        product.category ==
-                                        effectiveSelectedCategory,
-                                  )
-                                  .toList(growable: false);
-
-                        return Column(
-                          children: [
-                            Expanded(
-                              child: _buildMenuLayoutContent(filteredProducts),
-                            ),
-                            SizedBox(
-                              height: 56,
-                              child: ListView(
-                                scrollDirection: Axis.horizontal,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                ),
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 4,
-                                      vertical: 8,
-                                    ),
-                                    child: ChoiceChip(
-                                      label: const Text('All'),
-                                      selected:
-                                          effectiveSelectedCategory == null,
-                                      onSelected: (_) => setState(
-                                        () => _selectedCategory = null,
-                                      ),
-                                    ),
-                                  ),
-                                  ...categories.map(
-                                    (category) => Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 4,
-                                        vertical: 8,
-                                      ),
-                                      child: ChoiceChip(
-                                        label: Text(category),
-                                        selected:
-                                            effectiveSelectedCategory ==
-                                            category,
-                                        onSelected: (_) => setState(
-                                          () => _selectedCategory = category,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
+                            PopupMenuItem(
+                              value: 'view_settings',
+                              child: Text('View settings'),
                             ),
                           ],
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            flex: 2,
-            child: Consumer<CartProvider>(
-              builder: (context, cart, child) {
-                final hasCurrentOrderDraft =
-                    cart.items.isNotEmpty ||
-                    _customerName != null ||
-                    _tableName != null;
-                return Column(
-                  children: [
-                    _buildColumnHeader(
-                      title: 'Cart',
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (_isCartSelectionMode)
-                            TextButton(
-                              onPressed: cart.items.isEmpty
-                                  ? null
-                                  : _selectAllCartItems,
-                              child: const Text('Select all'),
-                            )
-                          else ...[
-                            PopupMenuButton<String>(
-                              tooltip: 'Print options',
-                              icon: const Icon(Icons.print),
-                              itemBuilder: (context) => const [
-                                PopupMenuItem(
-                                  value: 'prebill',
-                                  child: Text('Print pre-settlement bill'),
-                                ),
-                                PopupMenuItem(
-                                  value: 'kitchen',
-                                  child: Text('Print to kitchen'),
-                                ),
-                              ],
-                              onSelected: (value) async {
-                                if (value == 'prebill') {
-                                  await _printPreSettlementBill();
-                                } else if (value == 'kitchen') {
-                                  await _printKitchenTicket();
-                                }
-                              },
-                            ),
-                            StreamBuilder<List<Map<String, dynamic>>>(
-                              stream: _activeOrdersStream,
-                              builder: (context, snapshot) {
-                                final activeOrders =
-                                    snapshot.data ?? <Map<String, dynamic>>[];
-                                return IconButton(
-                                  tooltip: 'List (active order list)',
-                                  onPressed: _showActiveCashierOrdersDialog,
-                                  icon: Stack(
-                                    clipBehavior: Clip.none,
-                                    children: [
-                                      const Icon(Icons.list_alt),
-                                      if (activeOrders.isNotEmpty)
-                                        Positioned(
-                                          right: -8,
-                                          top: -8,
-                                          child: Container(
+                          onSelected: (value) async {
+                            if (value == 'refresh') {
+                              setState(() => _future = _loadProducts());
+                            } else if (value == 'view_settings') {
+                              await _showMenuViewSettingsDialog();
+                            }
+                          },
+                        ),
+                      ),
+                      Expanded(
+                        child: Container(
+                          color: Colors.grey[100],
+                          child: FutureBuilder<List<Product>>(
+                            future: _future,
+                            builder: (context, snapshot) {
+                              if (snapshot.connectionState ==
+                                  ConnectionState.waiting) {
+                                return const Center(
+                                  child: CircularProgressIndicator(),
+                                );
+                              }
+                              if (snapshot.hasError) {
+                                final errorText = snapshot.error.toString();
+                                final isPolicyError =
+                                    errorText.contains('row-level security') ||
+                                    errorText.contains('permission denied') ||
+                                    errorText.contains('not authorized') ||
+                                    errorText.contains('42501');
+
+                                return Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(24),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(
+                                          Icons.lock_outline,
+                                          size: 40,
+                                          color: Colors.orange,
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Text(
+                                          isPolicyError
+                                              ? 'Data cannot be read because Supabase Row Level Security policy blocks this client.'
+                                              : 'Error loading menu data.',
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          isPolicyError
+                                              ? 'Fix by updating Supabase RLS SELECT policies so this app client is allowed to read products/orders.'
+                                              : errorText,
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }
+                              if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                                return const Center(
+                                  child: Text('No products found!'),
+                                );
+                              }
+
+                              final products = snapshot.data!;
+                              final visibleProducts = products
+                                  .where(
+                                    (product) => !_hiddenMenuCategories
+                                        .contains(product.category),
+                                  )
+                                  .toList(growable: false);
+                              final categories =
+                                  visibleProducts
+                                      .map((product) => product.category)
+                                      .toSet()
+                                      .toList()
+                                    ..sort();
+                              final effectiveSelectedCategory =
+                                  categories.contains(_selectedCategory)
+                                  ? _selectedCategory
+                                  : null;
+                              final filteredProducts =
+                                  effectiveSelectedCategory == null
+                                  ? visibleProducts
+                                  : visibleProducts
+                                        .where(
+                                          (product) =>
+                                              product.category ==
+                                              effectiveSelectedCategory,
+                                        )
+                                        .toList(growable: false);
+
+                              return Column(
+                                children: [
+                                  Expanded(
+                                    child: _buildMenuLayoutContent(
+                                      filteredProducts,
+                                    ),
+                                  ),
+                                  SizedBox(
+                                    height: 56,
+                                    child: ListView(
+                                      scrollDirection: Axis.horizontal,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                      ),
+                                      children: [
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 4,
+                                            vertical: 8,
+                                          ),
+                                          child: ChoiceChip(
+                                            label: const Text('All'),
+                                            selected:
+                                                effectiveSelectedCategory ==
+                                                null,
+                                            onSelected: (_) => setState(
+                                              () => _selectedCategory = null,
+                                            ),
+                                          ),
+                                        ),
+                                        ...categories.map(
+                                          (category) => Padding(
                                             padding: const EdgeInsets.symmetric(
-                                              horizontal: 6,
-                                              vertical: 2,
+                                              horizontal: 4,
+                                              vertical: 8,
                                             ),
-                                            decoration: BoxDecoration(
-                                              color: Colors.blue,
-                                              borderRadius:
-                                                  BorderRadius.circular(10),
-                                            ),
-                                            child: Text(
-                                              activeOrders.length.toString(),
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.bold,
+                                            child: ChoiceChip(
+                                              label: Text(category),
+                                              selected:
+                                                  effectiveSelectedCategory ==
+                                                  category,
+                                              onSelected: (_) => setState(
+                                                () => _selectedCategory =
+                                                    category,
                                               ),
                                             ),
                                           ),
                                         ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                            IconButton(
-                              tooltip: 'Clear cart',
-                              onPressed: hasCurrentOrderDraft
-                                  ? _resetCurrentOrderDraft
-                                  : null,
-                              icon: const Icon(Icons.delete_sweep),
-                            ),
-                          ],
-                          PopupMenuButton<String>(
-                            tooltip: 'Cart settings',
-                            icon: const Icon(Icons.more_vert),
-                            itemBuilder: (context) => const [
-                              PopupMenuItem(
-                                value: 'gabung_nota',
-                                child: Text('Gabung nota'),
-                              ),
-                              PopupMenuItem(
-                                value: 'pisah_nota',
-                                child: Text('Pisah nota'),
-                              ),
-                              PopupMenuItem(
-                                value: 'batal_pesanan',
-                                child: Text('Batal pesanan'),
-                              ),
-                            ],
-                            onSelected: _onCartSettingSelected,
-                          ),
-                        ],
-                      ),
-                    ),
-                    _buildCartOrderDetailsTab(),
-                    Expanded(
-                      child: ClipRect(
-                        child: ListView.builder(
-                          itemCount: cart.items.length,
-                          itemBuilder: (context, index) {
-                            final entry = cart.items.entries.elementAt(index);
-                            final key = entry.key;
-                            final item = entry.value;
-
-                            final isSelected = _selectedCartItems.contains(key);
-
-                            final tile = ListTile(
-                              onLongPress: () =>
-                                  _enterSelectionModeWithItem(key),
-                              onTap: () {
-                                if (_isCartSelectionMode) {
-                                  _toggleSelectedCartItem(key);
-                                  return;
-                                }
-                                _openCartItemEditor(key, item);
-                              },
-                              title: Text(item.name),
-                              subtitle: Text(_cartSubtitle(item)),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (_isCartSelectionMode)
-                                    Padding(
-                                      padding: const EdgeInsets.only(right: 6),
-                                      child: Icon(
-                                        isSelected
-                                            ? Icons.check_circle
-                                            : Icons.radio_button_unchecked,
-                                        color: isSelected
-                                            ? Colors.green
-                                            : Colors.grey,
-                                        size: 18,
-                                      ),
-                                    )
-                                  else if (isSelected)
-                                    const Padding(
-                                      padding: EdgeInsets.only(right: 6),
-                                      child: Icon(
-                                        Icons.check_circle,
-                                        color: Colors.green,
-                                        size: 18,
-                                      ),
+                                      ],
                                     ),
-                                  Text(
-                                    'Rp ${((item.price + _modifierExtraFromData(item.modifiersData)) * item.quantity).toStringAsFixed(2)}',
                                   ),
                                 ],
-                              ),
-                            );
-
-                            if (_isCartSelectionMode) {
-                              return tile;
-                            }
-
-                            return Slidable(
-                              key: ValueKey(key),
-                              endActionPane: ActionPane(
-                                motion: const ScrollMotion(),
-                                extentRatio: 0.24,
-                                children: [
-                                  SlidableAction(
-                                    onPressed: (_) {
-                                      context.read<CartProvider>().removeItem(
-                                        key,
-                                      );
-                                      setState(() {
-                                        _selectedCartItems.remove(key);
-                                      });
-                                    },
-                                    backgroundColor: Colors.red,
-                                    foregroundColor: Colors.white,
-                                    icon: Icons.delete,
-                                    label: 'Delete',
-                                  ),
-                                ],
-                              ),
-                              child: tile,
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
                       ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.all(20),
-                      color: Colors.grey[200],
-                      child: Column(
+                    ],
+                  ),
+                ),
+                Expanded(
+                  flex: 2,
+                  child: Consumer<CartProvider>(
+                    builder: (context, cart, child) {
+                      final hasCurrentOrderDraft =
+                          cart.items.isNotEmpty ||
+                          _customerName != null ||
+                          _tableName != null;
+                      return Column(
                         children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Total:',
-                                style: TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Text(
-                                'Rp ${cart.totalAmount.toStringAsFixed(0)}',
-                                style: const TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              onPressed: cart.items.isEmpty
-                                  ? null
-                                  : () async {
-                                      if (_activeShiftId == null) {
-                                        _showDropdownSnackbar(
-                                          'No open shift. Please open a shift first.',
-                                          isError: true,
-                                        );
-                                        return;
+                          _buildColumnHeader(
+                            title: 'Cart',
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _buildCartExpandToggle(),
+                                if (_isCartSelectionMode)
+                                  TextButton(
+                                    onPressed: cart.items.isEmpty
+                                        ? null
+                                        : _selectAllCartItems,
+                                    child: const Text('Select all'),
+                                  )
+                                else ...[
+                                  PopupMenuButton<String>(
+                                    tooltip: 'Print options',
+                                    icon: const Icon(Icons.print),
+                                    itemBuilder: (context) => const [
+                                      PopupMenuItem(
+                                        value: 'prebill',
+                                        child: Text(
+                                          'Print pre-settlement bill',
+                                        ),
+                                      ),
+                                      PopupMenuItem(
+                                        value: 'kitchen',
+                                        child: Text('Print to kitchen'),
+                                      ),
+                                    ],
+                                    onSelected: (value) async {
+                                      if (value == 'prebill') {
+                                        await _printPreSettlementBill();
+                                      } else if (value == 'kitchen') {
+                                        await _printKitchenTicket();
                                       }
-                                      final payment =
-                                          await _showPaymentMethodModal(
-                                            cart.totalAmount,
-                                          );
-                                      if (!context.mounted || payment == null) {
-                                        return;
-                                      }
-
-                                      final receiptItems = cart.items.values
-                                          .map((item) {
-                                            final modifierExtra =
-                                                (item.modifiersData ??
-                                                        <dynamic>[])
-                                                    .whereType<
-                                                      Map<String, dynamic>
-                                                    >()
-                                                    .fold<double>(0, (
-                                                      sum,
-                                                      modifier,
-                                                    ) {
-                                                      final selected =
-                                                          modifier['selected_options']
-                                                              as List<
-                                                                dynamic
-                                                              >? ??
-                                                          <dynamic>[];
-                                                      return sum +
-                                                          selected
-                                                              .whereType<
-                                                                Map<
-                                                                  String,
-                                                                  dynamic
-                                                                >
-                                                              >()
-                                                              .fold<double>(
-                                                                0,
-                                                                (s, option) =>
-                                                                    s +
-                                                                    ((option['price']
-                                                                                as num?)
-                                                                            ?.toDouble() ??
-                                                                        0),
-                                                              );
-                                                    });
-                                            final unitPrice =
-                                                item.price + modifierExtra;
-                                            return <String, dynamic>{
-                                              'name': item.name,
-                                              'qty': item.quantity,
-                                              'subtotal':
-                                                  unitPrice * item.quantity,
-                                            };
-                                          })
-                                          .toList(growable: false);
-
-                                      final totalBeforeSubmit =
-                                          cart.totalAmount;
-                                      int? paidOrderId;
-
-                                      try {
-                                        if (_currentActiveOrderId != null) {
-                                          paidOrderId = await cart
-                                              .updateExistingOrder(
-                                                orderId: _currentActiveOrderId!,
-                                                customerName: _customerName,
-                                                tableName: _tableName,
-                                                orderType: _orderType,
-                                                paymentMethod: payment.method,
-                                                totalPaymentReceived: payment
-                                                    .totalPaymentReceived,
-                                                cashNominalBreakdown: payment
-                                                    .cashNominalBreakdown,
-                                                changeAmount:
-                                                    payment.changeAmount,
-                                                status: 'completed',
-                                              );
-                                        } else {
-                                          paidOrderId = await cart.submitOrder(
-                                            customerName: _customerName,
-                                            tableName: _tableName,
-                                            orderType: _orderType,
-                                            paymentMethod: payment.method,
-                                            totalPaymentReceived:
-                                                payment.totalPaymentReceived,
-                                            cashNominalBreakdown:
-                                                payment.cashNominalBreakdown,
-                                            changeAmount: payment.changeAmount,
-                                            status: 'completed',
-                                            parentOrderId:
-                                                _pendingParentOrderIdForNextSubmit,
-                                            cashierId: _activeCashierId,
-                                            shiftId: _activeShiftId,
-                                          );
-                                        }
-                                        if ((paidOrderId ?? 0) > 0) {
-                                          await ThermalPrinterService.instance
-                                              .printPaymentReceipt(
-                                                orderId: paidOrderId!,
-                                                lines: receiptItems,
-                                                total: totalBeforeSubmit,
-                                                paymentMethod: payment.method,
-                                                paid: payment
-                                                    .totalPaymentReceived,
-                                                change: payment.changeAmount,
-                                                customerName: _customerName,
-                                                tableName: _tableName,
-                                              );
-                                        }
-                                      } catch (error) {
-                                        if (!context.mounted) return;
-                                        if (paidOrderId != null) {
-                                          _showDropdownSnackbar(
-                                            'Payment saved, but failed to print: $error',
-                                            isError: true,
-                                          );
-                                        } else {
-                                          _showDropdownSnackbar(
-                                            'Failed to process payment: $error',
-                                            isError: true,
-                                          );
-                                          return;
-                                        }
-                                      }
-
-                                      _resetCurrentOrderDraft(
-                                        showMessage: false,
-                                      );
-                                      _showDropdownSnackbar(
-                                        (paidOrderId ?? 0) > 0
-                                            ? 'Payment success (${payment.method})'
-                                            : 'Offline saved. Sync later from app menu.',
+                                    },
+                                  ),
+                                  StreamBuilder<List<Map<String, dynamic>>>(
+                                    stream: _activeOrdersStream,
+                                    builder: (context, snapshot) {
+                                      final activeOrders =
+                                          snapshot.data ??
+                                          <Map<String, dynamic>>[];
+                                      return IconButton(
+                                        tooltip: 'List (active order list)',
+                                        onPressed:
+                                            _showActiveCashierOrdersDialog,
+                                        icon: Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            const Icon(Icons.list_alt),
+                                            if (activeOrders.isNotEmpty)
+                                              Positioned(
+                                                right: -8,
+                                                top: -8,
+                                                child: Container(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 6,
+                                                        vertical: 2,
+                                                      ),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.blue,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          10,
+                                                        ),
+                                                  ),
+                                                  child: Text(
+                                                    activeOrders.length
+                                                        .toString(),
+                                                    style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
                                       );
                                     },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.green,
-                                foregroundColor: Colors.white,
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Clear cart',
+                                    onPressed: hasCurrentOrderDraft
+                                        ? _resetCurrentOrderDraft
+                                        : null,
+                                    icon: const Icon(Icons.delete_sweep),
+                                  ),
+                                ],
+                                PopupMenuButton<String>(
+                                  tooltip: 'Cart settings',
+                                  icon: const Icon(Icons.more_vert),
+                                  itemBuilder: (context) => const [
+                                    PopupMenuItem(
+                                      value: 'gabung_nota',
+                                      child: Text('Gabung nota'),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'pisah_nota',
+                                      child: Text('Pisah nota'),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'batal_pesanan',
+                                      child: Text('Batal pesanan'),
+                                    ),
+                                  ],
+                                  onSelected: _onCartSettingSelected,
+                                ),
+                              ],
+                            ),
+                          ),
+                          _buildCartOrderDetailsTab(),
+                          Expanded(
+                            child: ClipRect(
+                              child: ListView.builder(
+                                itemCount: cart.items.length,
+                                itemBuilder: (context, index) {
+                                  final entry = cart.items.entries.elementAt(
+                                    index,
+                                  );
+                                  final key = entry.key;
+                                  final item = entry.value;
+
+                                  final isSelected = _selectedCartItems
+                                      .contains(key);
+
+                                  final tile = ListTile(
+                                    onLongPress: () =>
+                                        _enterSelectionModeWithItem(key),
+                                    onTap: () {
+                                      if (_isCartSelectionMode) {
+                                        _toggleSelectedCartItem(key);
+                                        return;
+                                      }
+                                      _openCartItemEditor(key, item);
+                                    },
+                                    title: Text(item.name),
+                                    subtitle: Text(_cartSubtitle(item)),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (_isCartSelectionMode)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              right: 6,
+                                            ),
+                                            child: Icon(
+                                              isSelected
+                                                  ? Icons.check_circle
+                                                  : Icons
+                                                        .radio_button_unchecked,
+                                              color: isSelected
+                                                  ? Colors.green
+                                                  : Colors.grey,
+                                              size: 18,
+                                            ),
+                                          )
+                                        else if (isSelected)
+                                          const Padding(
+                                            padding: EdgeInsets.only(right: 6),
+                                            child: Icon(
+                                              Icons.check_circle,
+                                              color: Colors.green,
+                                              size: 18,
+                                            ),
+                                          ),
+                                        Text(
+                                          'Rp ${((item.price + _modifierExtraFromData(item.modifiersData)) * item.quantity).toStringAsFixed(2)}',
+                                        ),
+                                      ],
+                                    ),
+                                  );
+
+                                  if (_isCartSelectionMode) {
+                                    return tile;
+                                  }
+
+                                  return Slidable(
+                                    key: ValueKey(key),
+                                    endActionPane: ActionPane(
+                                      motion: const ScrollMotion(),
+                                      extentRatio: 0.24,
+                                      children: [
+                                        SlidableAction(
+                                          onPressed: (_) {
+                                            context
+                                                .read<CartProvider>()
+                                                .removeItem(key);
+                                            setState(() {
+                                              _selectedCartItems.remove(key);
+                                            });
+                                          },
+                                          backgroundColor: Colors.red,
+                                          foregroundColor: Colors.white,
+                                          icon: Icons.delete,
+                                          label: 'Delete',
+                                        ),
+                                      ],
+                                    ),
+                                    child: tile,
+                                  );
+                                },
                               ),
-                              child: const Text('PAY'),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.all(20),
+                            color: Colors.grey[200],
+                            child: Column(
+                              children: [
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    const Text(
+                                      'Total:',
+                                      style: TextStyle(
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    Text(
+                                      'Rp ${cart.totalAmount.toStringAsFixed(0)}',
+                                      style: const TextStyle(
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: ElevatedButton(
+                                        onPressed: cart.items.isEmpty
+                                            ? null
+                                            : () => _handleSaveCartOrder(cart),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.blue,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                        child: const Text('SAVE'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: ElevatedButton(
+                                        onPressed: cart.items.isEmpty
+                                            ? null
+                                            : () => _handlePayCartOrder(cart),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.green,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                        child: const Text('PAY'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
                         ],
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  void _resetSplitBoardState() {
+    _unassignedSplitItems.clear();
+    _splitGroups.clear();
+    _selectedSplitItemId = null;
+    _popoverSplitItemId = null;
+    _splitQuantityDraft = 1;
+    _splitGroupCounter = 0;
+    _splitItemCounter = 0;
+  }
+
+  String _nextSplitItemId(String prefix) {
+    _splitItemCounter += 1;
+    return '${prefix}_split_item_$_splitItemCounter';
+  }
+
+  Widget _buildCartExpandToggle() {
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        elevation: 2,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(24),
+          onTap: () {
+            setState(() {
+              _isCartExpanded = !_isCartExpanded;
+              _resetSplitBoardState();
+            });
+          },
+          child: Icon(
+            _isCartExpanded ? Icons.chevron_right : Icons.chevron_left,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _ensureSplitBoardSeed(CartProvider cart) {
+    if (_unassignedSplitItems.isNotEmpty || _splitGroups.isNotEmpty) return;
+
+    for (final entry in cart.items.entries) {
+      final cartItem = entry.value;
+      final extra = _modifierExtraFromData(cartItem.modifiersData);
+      _unassignedSplitItems.add(
+        _SplitBoardItem(
+          id: _nextSplitItemId(entry.key),
+          name: cartItem.name,
+          quantity: cartItem.quantity,
+          unitPrice: cartItem.price + extra,
+        ),
+      );
+    }
+
+    if (_splitGroups.isEmpty) {
+      _splitGroups.add(_newSplitGroup());
+    }
+  }
+
+  _SplitGroup _newSplitGroup() {
+    _splitGroupCounter += 1;
+    return _SplitGroup(
+      id: 'group_$_splitGroupCounter',
+      groupName: 'Group $_splitGroupCounter',
+      items: <_SplitBoardItem>[],
+    );
+  }
+
+  void _confirmSplit(_SplitBoardItem item) {
+    if (_splitQuantityDraft <= 0 || _splitQuantityDraft >= item.quantity) {
+      setState(() => _popoverSplitItemId = null);
+      return;
+    }
+
+    setState(() {
+      item.quantity -= _splitQuantityDraft;
+      final index = _unassignedSplitItems.indexWhere(
+        (entry) => entry.id == item.id,
+      );
+      final newItem = _SplitBoardItem(
+        id: _nextSplitItemId(item.id),
+        name: item.name,
+        quantity: _splitQuantityDraft,
+        unitPrice: item.unitPrice,
+      );
+      _unassignedSplitItems.insert(index + 1, newItem);
+      _selectedSplitItemId = newItem.id;
+      _popoverSplitItemId = null;
+      _splitQuantityDraft = 1;
+    });
+  }
+
+  num _groupSubtotal(_SplitGroup group) {
+    return group.items.fold<num>(
+      0,
+      (sum, item) => sum + (item.quantity * item.unitPrice),
+    );
+  }
+
+  num _allGroupsTotal() {
+    return _splitGroups.fold<num>(
+      0,
+      (sum, group) => sum + _groupSubtotal(group),
+    );
+  }
+
+  Widget _buildSplitBoardBody() {
+    return Consumer<CartProvider>(
+      builder: (context, cart, _) {
+        _ensureSplitBoardSeed(cart);
+
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  _buildCartExpandToggle(),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Split Bill / Group Order',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Container(
+                      color: Colors.white,
+                      child: ListView.builder(
+                        itemCount: _unassignedSplitItems.length,
+                        itemBuilder: (context, index) {
+                          final item = _unassignedSplitItems[index];
+                          final isSelected = _selectedSplitItemId == item.id;
+                          final popoverOpen = _popoverSplitItemId == item.id;
+
+                          return Card(
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: Column(
+                                children: [
+                                  ListTile(
+                                    tileColor: isSelected
+                                        ? Colors.blue.withOpacity(0.08)
+                                        : null,
+                                    title: Text(item.name),
+                                    subtitle: Text('Qty: ${item.quantity}'),
+                                    trailing: Text(
+                                      _formatRupiah(
+                                        item.quantity * item.unitPrice,
+                                      ),
+                                    ),
+                                    onTap: () {
+                                      setState(() {
+                                        _selectedSplitItemId = item.id;
+                                      });
+                                    },
+                                    onLongPress: () {
+                                      setState(() {
+                                        _popoverSplitItemId = item.id;
+                                        _splitQuantityDraft = 1;
+                                      });
+                                    },
+                                  ),
+                                  if (popoverOpen)
+                                    Row(
+                                      children: [
+                                        IconButton(
+                                          onPressed: _splitQuantityDraft > 1
+                                              ? () => setState(
+                                                  () => _splitQuantityDraft--,
+                                                )
+                                              : null,
+                                          icon: const Icon(
+                                            Icons.remove_circle_outline,
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: Center(
+                                            child: Text(
+                                              'Split $_splitQuantityDraft',
+                                            ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          onPressed:
+                                              _splitQuantityDraft <
+                                                  item.quantity - 1
+                                              ? () => setState(
+                                                  () => _splitQuantityDraft++,
+                                                )
+                                              : null,
+                                          icon: const Icon(
+                                            Icons.add_circle_outline,
+                                          ),
+                                        ),
+                                        ElevatedButton(
+                                          onPressed: () => _confirmSplit(item),
+                                          child: const Text('Confirm Split'),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
                       ),
                     ),
-                  ],
-                );
-              },
+                  ),
+                  Expanded(
+                    flex: 4,
+                    child: GridView.builder(
+                      padding: const EdgeInsets.all(12),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            crossAxisSpacing: 12,
+                            mainAxisSpacing: 12,
+                            childAspectRatio: 1.3,
+                          ),
+                      itemCount: _splitGroups.length + 1,
+                      itemBuilder: (context, index) {
+                        if (index == _splitGroups.length) {
+                          return OutlinedButton.icon(
+                            onPressed: () => setState(
+                              () => _splitGroups.add(_newSplitGroup()),
+                            ),
+                            icon: const Icon(Icons.add),
+                            label: const Text('Add New Group'),
+                          );
+                        }
+
+                        final group = _splitGroups[index];
+                        return Card(
+                          child: InkWell(
+                            onTap: () {
+                              if (_selectedSplitItemId == null) return;
+                              final selectedIndex = _unassignedSplitItems
+                                  .indexWhere(
+                                    (item) => item.id == _selectedSplitItemId,
+                                  );
+                              if (selectedIndex < 0) return;
+                              setState(() {
+                                final selected = _unassignedSplitItems.removeAt(
+                                  selectedIndex,
+                                );
+                                group.items.add(selected);
+                                _selectedSplitItemId = null;
+                              });
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.all(10),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    group.groupName,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Expanded(
+                                    child: group.items.isEmpty
+                                        ? const Text(
+                                            'Tap item on left then tap this group',
+                                          )
+                                        : ListView(
+                                            children: group.items
+                                                .map(
+                                                  (item) => Text(
+                                                    '${item.quantity}x ${item.name}',
+                                                  ),
+                                                )
+                                                .toList(growable: false),
+                                          ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Subtotal: ${_formatRupiah(_groupSubtotal(group))}',
+                                  ),
+                                  const SizedBox(height: 6),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: ElevatedButton(
+                                      onPressed: group.items.isEmpty
+                                          ? null
+                                          : () => _showDropdownSnackbar(
+                                              'Pay ${group.groupName}: ${_formatRupiah(_groupSubtotal(group))}',
+                                            ),
+                                      child: Text(
+                                        'Pay ${_formatRupiah(_groupSubtotal(group))}',
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
-      ),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade200,
+                border: Border(top: BorderSide(color: Colors.grey.shade300)),
+              ),
+              child: Row(
+                children: [
+                  Text('Total groups: ${_formatRupiah(_allGroupsTotal())}'),
+                  const Spacer(),
+                  ElevatedButton(
+                    onPressed:
+                        _splitGroups.any((group) => group.items.isNotEmpty)
+                        ? () => _showDropdownSnackbar(
+                            'Pay all groups: ${_formatRupiah(_allGroupsTotal())}',
+                          )
+                        : null,
+                    child: Text(
+                      'Pay All Groups (${_formatRupiah(_allGroupsTotal())})',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  List<Map<String, dynamic>> _buildReceiptItems(CartProvider cart) {
+    return cart.items.values
+        .map((item) {
+          final modifierExtra = (item.modifiersData ?? <dynamic>[])
+              .whereType<Map<String, dynamic>>()
+              .fold<double>(0, (sum, modifier) {
+                final selected =
+                    modifier['selected_options'] as List<dynamic>? ??
+                    <dynamic>[];
+                return sum +
+                    selected.whereType<Map<String, dynamic>>().fold<double>(
+                      0,
+                      (s, option) =>
+                          s + ((option['price'] as num?)?.toDouble() ?? 0),
+                    );
+              });
+          final unitPrice = item.price + modifierExtra;
+          return <String, dynamic>{
+            'name': item.name,
+            'qty': item.quantity,
+            'subtotal': unitPrice * item.quantity,
+          };
+        })
+        .toList(growable: false);
+  }
+
+  Future<void> _handleSaveCartOrder(CartProvider cart) async {
+    if ((_customerName ?? '').trim().isEmpty) {
+      _showDropdownSnackbar('Enter customer name first.', isError: true);
+      await _showOfflineOrderDetailModal();
+      if ((_customerName ?? '').trim().isEmpty) {
+        return;
+      }
+    }
+    if (_activeShiftId == null) {
+      _showDropdownSnackbar(
+        'No open shift. Please open a shift first.',
+        isError: true,
+      );
+      return;
+    }
+
+    try {
+      final savedOrderId = _currentActiveOrderId != null
+          ? await cart.updateExistingOrder(
+              orderId: _currentActiveOrderId!,
+              customerName: _customerName,
+              tableName: _tableName,
+              orderType: _orderType,
+              status: 'active',
+            )
+          : await cart.submitOrder(
+              customerName: _customerName,
+              tableName: _tableName,
+              orderType: _orderType,
+              status: 'active',
+              parentOrderId: _pendingParentOrderIdForNextSubmit,
+              cashierId: _activeCashierId,
+              shiftId: _activeShiftId,
+            );
+
+      if (!mounted) return;
+      _resetCurrentOrderDraft(showMessage: false);
+      _showDropdownSnackbar(
+        (savedOrderId > 0)
+            ? 'Order saved successfully.'
+            : 'Offline saved. Sync later from app menu.',
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showDropdownSnackbar('Failed to save order: $error', isError: true);
+    }
+  }
+
+  Future<void> _handlePayCartOrder(CartProvider cart) async {
+    if ((_customerName ?? '').trim().isEmpty) {
+      _showDropdownSnackbar('Enter customer name first.', isError: true);
+      await _showOfflineOrderDetailModal();
+      if ((_customerName ?? '').trim().isEmpty) {
+        return;
+      }
+    }
+    if (_activeShiftId == null) {
+      _showDropdownSnackbar(
+        'No open shift. Please open a shift first.',
+        isError: true,
+      );
+      return;
+    }
+
+    final payment = await _showPaymentMethodModal(cart.totalAmount);
+    if (!mounted || payment == null) {
+      return;
+    }
+
+    final receiptItems = _buildReceiptItems(cart);
+    final totalBeforeSubmit = cart.totalAmount;
+    int? paidOrderId;
+
+    try {
+      if (_currentActiveOrderId != null) {
+        paidOrderId = await cart.updateExistingOrder(
+          orderId: _currentActiveOrderId!,
+          customerName: _customerName,
+          tableName: _tableName,
+          orderType: _orderType,
+          paymentMethod: payment.method,
+          totalPaymentReceived: payment.totalPaymentReceived,
+          cashNominalBreakdown: payment.cashNominalBreakdown,
+          changeAmount: payment.changeAmount,
+          status: 'completed',
+        );
+      } else {
+        paidOrderId = await cart.submitOrder(
+          customerName: _customerName,
+          tableName: _tableName,
+          orderType: _orderType,
+          paymentMethod: payment.method,
+          totalPaymentReceived: payment.totalPaymentReceived,
+          cashNominalBreakdown: payment.cashNominalBreakdown,
+          changeAmount: payment.changeAmount,
+          status: 'completed',
+          parentOrderId: _pendingParentOrderIdForNextSubmit,
+          cashierId: _activeCashierId,
+          shiftId: _activeShiftId,
+        );
+      }
+
+      if ((paidOrderId ?? 0) > 0) {
+        await ThermalPrinterService.instance.printPaymentReceipt(
+          orderId: paidOrderId!,
+          lines: receiptItems,
+          total: totalBeforeSubmit,
+          paymentMethod: payment.method,
+          paid: payment.totalPaymentReceived,
+          change: payment.changeAmount,
+          customerName: _customerName,
+          tableName: _tableName,
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      if (paidOrderId != null) {
+        _showDropdownSnackbar(
+          'Payment saved, but failed to print: $error',
+          isError: true,
+        );
+      } else {
+        _showDropdownSnackbar(
+          'Failed to process payment: $error',
+          isError: true,
+        );
+        return;
+      }
+    }
+
+    _resetCurrentOrderDraft(showMessage: false);
+    _showDropdownSnackbar(
+      (paidOrderId ?? 0) > 0
+          ? 'Payment success (${payment.method})'
+          : 'Offline saved. Sync later from app menu.',
     );
   }
 
@@ -1601,4 +2130,26 @@ class _ProductListScreenState extends State<ProductListScreen> {
 
     return null;
   }
+}
+
+class _SplitBoardItem {
+  _SplitBoardItem({
+    required this.id,
+    required this.name,
+    required this.quantity,
+    required this.unitPrice,
+  });
+
+  final String id;
+  final String name;
+  int quantity;
+  final num unitPrice;
+}
+
+class _SplitGroup {
+  _SplitGroup({required this.id, required this.groupName, required this.items});
+
+  final String id;
+  final String groupName;
+  final List<_SplitBoardItem> items;
 }
